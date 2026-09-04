@@ -4,8 +4,7 @@
 // @version     1.0
 // @description  ExHentai/E-Hentai 一体化工具：LANraragi 查重、纯浏览器图片 ZIP 下载与元数据打包、快捷收藏、全局搜索、翻译高亮及统一悬浮面板。
 // @description:en  All-in-one ExHentai/E-Hentai toolkit with LANraragi duplicate checking, image ZIP downloads, metadata, favorites, search and translation highlighting.
-// @author      Putarku
-// @maintainer  Alog6437
+// @author      Alog6437
 // @homepageURL https://github.com/Alog6437/ExHentai-Library-Toolkit
 // @supportURL  https://github.com/Alog6437/ExHentai-Library-Toolkit/issues
 // @include      https://e-hentai.org/*
