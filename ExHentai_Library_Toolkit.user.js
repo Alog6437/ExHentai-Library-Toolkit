@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name        ExHentai Library Toolkit
 // @namespace   https://github.com/Alog6437/ExHentai-Library-Toolkit
-// @version     1.0.1
+// @version     1.0.2
 // @description  ExHentai/E-Hentai 一体化工具：LANraragi 查重、纯浏览器图片 ZIP 下载与元数据打包、快捷收藏、全局搜索、翻译高亮及统一悬浮面板。
 // @description:en  All-in-one ExHentai/E-Hentai toolkit with LANraragi duplicate checking, image ZIP downloads, metadata, favorites, search and translation highlighting.
 // @author      Alog6437
@@ -1432,26 +1432,39 @@
       return { hit: hasHits, hits: altHits };
     }
 
-    async function performAlternativeSearch(searchQuery, titleElement, generation) {
+    // 备用搜索不能“搜到任何结果就算命中”。LANraragi 的 filter 可能返回仅部分关键词相同的归档，
+    // 因此先拿原始候选，再在本地做作者 + 标题二次校验，避免明显误报。
+    async function performAlternativeSearch(searchQuery, sourceFullTitle, titleElement, generation) {
       if (hasLrrMarker(titleElement)) return { success: false, skipped: true };
-      var altKey = 'lrr-checker-v2-alt-' + simpleHash(searchQuery);
-      var cached = getCache(altKey);
+
+      var filteredKey = 'lrr-checker-v4-alt-strict-' + simpleHash(sourceFullTitle + '|' + searchQuery);
+      var cached = getCache(filteredKey);
       if (cached && typeof cached.altHit === 'boolean') {
         if (cached.altHit && generation === lrrScanGeneration)
           prependLrrMarker(titleElement, '(LRR ≈)', ['lrr-marker-file'], 'alt', cached.altHits || [], null, searchQuery);
         return { success: cached.altHit, cached: true, hits: cached.altHits || [] };
       }
+
+      var rawKey = 'lrr-checker-v4-alt-raw-' + simpleHash(searchQuery);
       if (!altSearchInflight.has(searchQuery)) {
-        var p = runAltSearchLimited(function () { return fetchAltSearchHttp(searchQuery, altKey); });
+        var p = runAltSearchLimited(function () { return fetchAltSearchHttp(searchQuery, rawKey); });
         altSearchInflight.set(searchQuery, p);
         p.catch(function () {}).finally(function () { altSearchInflight.delete(searchQuery); });
       }
+
       try {
         var result = await altSearchInflight.get(searchQuery);
         if (generation !== lrrScanGeneration) return { success: false, stale: true };
-        if (result && result.hit && !hasLrrMarker(titleElement))
-          prependLrrMarker(titleElement, '(LRR ≈)', ['lrr-marker-file'], 'alt', result.hits || [], null, searchQuery);
-        return { success: result ? result.hit : false, hits: result ? (result.hits || []) : [] };
+
+        var hits = (result && result.hits ? result.hits : []).filter(function (item) {
+          return item && item.title && isStrictCandidateMatch(sourceFullTitle, item.title);
+        });
+        var hit = hits.length > 0;
+        setCache(filteredKey, { altHit: hit, altHits: hits });
+
+        if (hit && !hasLrrMarker(titleElement))
+          prependLrrMarker(titleElement, '(LRR ≈)', ['lrr-marker-file'], 'alt', hits, null, searchQuery);
+        return { success: hit, hits: hits };
       } catch (e) {
         return { success: false, error: e, hits: [] };
       }
@@ -1491,8 +1504,9 @@
 
     function looseKeyIsUseful(value) {
       if (!value) return false;
-      if (/[\u3040-\u30ff\u3400-\u9fff]/.test(value)) return value.length >= 2;
-      return value.length >= 4;
+      // 太短的标题非常容易在 LRR filter 中撞到无关作品；CJK 至少 3 字，其它至少 5 字。
+      if (/[\u3040-\u30ff\u3400-\u9fff]/.test(value)) return value.length >= 3;
+      return value.length >= 5;
     }
 
     function looseDiceScore(a, b) {
@@ -1533,23 +1547,71 @@
       };
     }
 
+    function looseContainmentScore(a, b) {
+      if (!a || !b) return 0;
+      if (a === b) return 1;
+      var shorter = a.length <= b.length ? a : b;
+      var longer = a.length > b.length ? a : b;
+      if (!looseKeyIsUseful(shorter) || longer.indexOf(shorter) < 0) return 0;
+      return shorter.length / longer.length;
+    }
+
+    function looseAuthorMatch(sourceAuthor, candidateAuthor) {
+      var a = normalizeLooseTitle(sourceAuthor);
+      var b = normalizeLooseTitle(candidateAuthor);
+      if (!a || !b) return false;
+      if (a === b) return true;
+      if (looseContainmentScore(a, b) >= 0.80) return true;
+      return looseDiceScore(a, b) >= 0.82;
+    }
+
+    // “作者 + 标题”备用搜索的严格校验：作者必须一致，标题也必须高度相似。
+    function isStrictCandidateMatch(sourceFullTitle, candidateTitle) {
+      var sourceParts = extractLooseTitleParts(sourceFullTitle);
+      var candidateParts = extractLooseTitleParts(candidateTitle);
+      var sourceAuthor = sourceParts.author;
+      var candidateAuthor = candidateParts.author;
+      var sourceCore = normalizeLooseTitle(sourceParts.coreTitle);
+      var candidateCore = normalizeLooseTitle(candidateParts.coreTitle);
+
+      if (!sourceAuthor || !candidateAuthor || !sourceCore || !candidateCore) return false;
+      if (!looseAuthorMatch(sourceAuthor, candidateAuthor)) return false;
+      if (sourceCore === candidateCore) return true;
+      if (looseContainmentScore(sourceCore, candidateCore) >= 0.82) return true;
+      return looseDiceScore(sourceCore, candidateCore) >= 0.86;
+    }
+
     function isLooseCandidateMatch(sourceFullTitle, searchTitle, candidateTitle) {
-      var sourceCore = normalizeLooseTitle(extractLooseTitleParts(sourceFullTitle).coreTitle);
+      var sourceParts = extractLooseTitleParts(sourceFullTitle);
+      var candidateParts = extractLooseTitleParts(candidateTitle);
+      var sourceCore = normalizeLooseTitle(sourceParts.coreTitle);
       var queryCore = normalizeLooseTitle(searchTitle);
-      var candidateCore = normalizeLooseTitle(extractLooseTitleParts(candidateTitle).coreTitle);
+      var candidateCore = normalizeLooseTitle(candidateParts.coreTitle);
 
       if (!candidateCore) return false;
 
-      if (looseKeyIsUseful(queryCore) &&
-          (candidateCore.indexOf(queryCore) >= 0 || queryCore.indexOf(candidateCore) >= 0))
-        return true;
+      var sourceAuthor = sourceParts.author;
+      var candidateAuthor = candidateParts.author;
+      var authorMatched = !!(sourceAuthor && candidateAuthor && looseAuthorMatch(sourceAuthor, candidateAuthor));
 
-      if (looseKeyIsUseful(sourceCore) &&
-          (candidateCore.indexOf(sourceCore) >= 0 || sourceCore.indexOf(candidateCore) >= 0))
-        return true;
+      // 两边都有作者时，作者对不上直接排除；这是压低误报最有效的一道门槛。
+      if (sourceAuthor && candidateAuthor && !authorMatched) return false;
 
-      return looseDiceScore(sourceCore, candidateCore) >= 0.50 ||
-        looseDiceScore(queryCore, candidateCore) >= 0.60;
+      if (sourceCore === candidateCore || queryCore === candidateCore) return true;
+
+      var containment = Math.max(
+        looseContainmentScore(sourceCore, candidateCore),
+        looseContainmentScore(queryCore, candidateCore)
+      );
+      var dice = Math.max(
+        looseDiceScore(sourceCore, candidateCore),
+        looseDiceScore(queryCore, candidateCore)
+      );
+
+      // 有作者佐证时仍要求标题至少 78% 包含覆盖或 80% Dice；
+      // 候选缺作者时，仅凭标题必须达到更高阈值，避免常见短标题误撞。
+      if (authorMatched) return containment >= 0.78 || dice >= 0.80;
+      return containment >= 0.88 || dice >= 0.88;
     }
 
     async function performLooseTitleSearch(searchTitle, sourceFullTitle, titleElement, generation) {
@@ -1559,7 +1621,7 @@
       if (!looseKeyIsUseful(normalizedQuery)) return { success: false, skipped: true };
 
       // 新缓存前缀避免旧版“未命中”缓存阻止新的宽松匹配。
-      var filteredKey = 'lrr-checker-v3-loose-' + simpleHash(sourceFullTitle + '|' + searchTitle);
+      var filteredKey = 'lrr-checker-v4-loose-' + simpleHash(sourceFullTitle + '|' + searchTitle);
       var cached = getCache(filteredKey);
       if (cached && typeof cached.altHit === 'boolean') {
         if (cached.altHit && generation === lrrScanGeneration && !hasLrrMarker(titleElement))
@@ -1567,7 +1629,7 @@
         return { success: cached.altHit, cached: true };
       }
 
-      var rawKey = 'lrr-checker-v3-loose-raw-' + simpleHash(searchTitle);
+      var rawKey = 'lrr-checker-v4-loose-raw-' + simpleHash(searchTitle);
       try {
         var result = await runAltSearchLimited(function () {
           return fetchAltSearchHttp(searchTitle, rawKey);
@@ -1610,7 +1672,7 @@
 
       // 一级：作者 + 主标题；二级：主标题单独搜索 + 宽松候选过滤。
       if (author && author !== title) {
-        performAlternativeSearch(author + ',' + title, titleElement, generation).then(function (r) {
+        performAlternativeSearch(author + ',' + title, fullTitle, titleElement, generation).then(function (r) {
           if (r && r.success) return;
           if (generation !== lrrScanGeneration || hasLrrMarker(titleElement)) return;
           performLooseTitleSearch(title, fullTitle, titleElement, generation);
