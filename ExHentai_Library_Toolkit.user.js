@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name        ExHentai Library Toolkit
 // @namespace   https://github.com/Alog6437/ExHentai-Library-Toolkit
-// @version     1.0
+// @version     1.0.1
 // @description  ExHentai/E-Hentai 一体化工具：LANraragi 查重、纯浏览器图片 ZIP 下载与元数据打包、快捷收藏、全局搜索、翻译高亮及统一悬浮面板。
 // @description:en  All-in-one ExHentai/E-Hentai toolkit with LANraragi duplicate checking, image ZIP downloads, metadata, favorites, search and translation highlighting.
 // @author      Alog6437
@@ -1132,8 +1132,19 @@
       return clone.textContent.replace(/\s+/g, ' ').trim();
     }
 
+    // Thumbnail 模式将标签放到封面角标层，避免占用标题宽度；其它列表模式仍放在标题前。
+    function getLrrMarkerScope(titleElement) {
+      if (!titleElement) return null;
+      if (titleElement.matches && titleElement.matches('.gl4t.glname')) {
+        var item = titleElement.closest('.gl1t');
+        if (item) return item;
+      }
+      return titleElement;
+    }
+
     function hasLrrMarker(titleElement) {
-      return !!(titleElement && titleElement.querySelector('.lrr-marker-span'));
+      var scope = getLrrMarkerScope(titleElement);
+      return !!(scope && scope.querySelector('.lrr-marker-span'));
     }
 
     function formatLrrSize(bytes) {
@@ -1155,8 +1166,9 @@
       if (!titleElement || !titleElement.isConnected) return;
       hits = hits || [];
 
-      // 页面重绘/重复补扫时只保留一个标签。
-      titleElement.querySelectorAll('.lrr-marker-span').forEach(function (el) { el.remove(); });
+      // 页面重绘/重复补扫时只保留一个标签。Thumbnail 模式的标签可能位于封面层。
+      var markerScope = getLrrMarkerScope(titleElement) || titleElement;
+      markerScope.querySelectorAll('.lrr-marker-span').forEach(function (el) { el.remove(); });
 
       var markerSpan = document.createElement('span');
       markerSpan.classList.add('lrr-marker-span');
@@ -1182,7 +1194,16 @@
         openLrrSearch(keyword);
       }, true);
 
-      titleElement.insertBefore(markerSpan, titleElement.firstChild);
+      // Thumbnail 模式把 LRR 标签叠加到封面左上角，不再挤压/截断标题。
+      var thumbItem = titleElement.matches && titleElement.matches('.gl4t.glname') ? titleElement.closest('.gl1t') : null;
+      var thumbHost = thumbItem ? thumbItem.querySelector('.gl3t') : null;
+      if (thumbHost) {
+        thumbHost.classList.add('eh-lrr-marker-host');
+        markerSpan.classList.add('lrr-marker-thumbnail');
+        thumbHost.appendChild(markerSpan);
+      } else {
+        titleElement.insertBefore(markerSpan, titleElement.firstChild);
+      }
     }
 
     function getAuthorizationHeaderValue(apiKey) {
@@ -2099,7 +2120,7 @@
     <div class="eh-tb-actions eh-gdl-actions">
       <button id="eh-gdl-save" class="eh-tb-btn eh-gdl-btn-save">保存下载设置</button>
     </div>
-    <div class="eh-tb-footer">ExHentai Library Toolkit v1.0 · Pure Browser Downloader · LRR info.json</div>
+    <div class="eh-tb-footer">ExHentai Library Toolkit v1.0.2 · Pure Browser Downloader · LRR info.json</div>
   </div>
 </div>`
 
@@ -2406,11 +2427,20 @@
 /* LRR Marker 样式 */
 .lrr-marker-span {
   z-index:20;
-  font-weight: bold; border-radius: 3px; padding: 0 3px; margin-right: 4px;
-  font-size: 0.9em; position: relative; display: inline-block;
-  cursor: pointer; transition: filter 0.15s;
+  font-weight: 700; border-radius: 4px; padding: 1px 5px; margin-right: 4px;
+  font-size: 0.96em; position: relative; display: inline-block;
+  cursor: pointer; transition: filter 0.15s, transform 0.15s;
 }
-.lrr-marker-span:hover { filter: brightness(1.2); z-index:999999 !important; }
+.lrr-marker-span:hover { filter: brightness(1.2); transform: translateY(-1px); z-index:999999 !important; }
+/* Thumbnail 模式：LRR 标签作为封面角标，不参与标题排版，避免把标题挤成竖排/截断。 */
+.gl3t.eh-lrr-marker-host { position: relative !important; }
+.gl3t.eh-lrr-marker-host > .lrr-marker-thumbnail {
+  position: absolute !important; top: 6px; left: 6px; margin: 0 !important;
+  z-index: 60 !important; line-height: 1.45; white-space: nowrap;
+  font-size: 14px !important; font-weight: 800 !important;
+  border-radius: 6px; padding: 3px 9px; letter-spacing: .2px;
+  box-shadow: 0 2px 8px rgba(0,0,0,.55);
+}
 .lrr-marker-downloaded { color: #fff; background: linear-gradient(135deg, #28a745, #49995d); }
 .lrr-marker-file { color: #fff; background: linear-gradient(135deg, #356ddc, #894ab0); }
 .lrr-marker-error { color: #fff; background: linear-gradient(135deg, #dc3545, #e05656); }
