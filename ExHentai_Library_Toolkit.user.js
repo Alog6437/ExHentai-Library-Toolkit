@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name        ExHentai Library Toolkit
 // @namespace   https://github.com/Alog6437/ExHentai-Library-Toolkit
-// @version     1.1.0
+// @version     1.1.1
 // @description  ExHentai/E-Hentai 一体化工具：LANraragi 查重、纯浏览器图片 ZIP 下载与元数据打包、快捷收藏、全局搜索、翻译高亮及统一悬浮面板。
 // @description:en  All-in-one ExHentai/E-Hentai toolkit with LANraragi duplicate checking, image ZIP downloads, metadata, favorites, search and translation highlighting.
 // @author      Alog6437
@@ -1079,11 +1079,19 @@
           localStorage.removeItem(exactKey);
           removed++;
         }
-        var altKey = getAltCacheKeyFromTitle(entry.titleElement);
-        if (altKey && localStorage.getItem(altKey) !== null) {
-          localStorage.removeItem(altKey);
-          removed++;
-        }
+        var fullTitle = getGalleryTitlePlain(entry.titleElement);
+        var parts = extractLooseTitleParts(fullTitle);
+        var altKeys = [
+          getAltCacheKeyFromTitle(entry.titleElement),
+          'lrr-checker-v5-alt-strict-' + simpleHash(fullTitle + '|' + parts.author + ',' + parts.shortTitle),
+          'lrr-checker-v5-loose-' + simpleHash(fullTitle + '|' + parts.shortTitle)
+        ];
+        altKeys.forEach(function (altKey) {
+          if (altKey && localStorage.getItem(altKey) !== null) {
+            localStorage.removeItem(altKey);
+            removed++;
+          }
+        });
       });
       return removed;
     }
@@ -1594,7 +1602,7 @@
     async function performAlternativeSearch(searchQuery, sourceFullTitle, titleElement, generation) {
       if (hasLrrMarker(titleElement)) return { success: false, skipped: true };
 
-      var filteredKey = 'lrr-checker-v4-alt-strict-' + simpleHash(sourceFullTitle + '|' + searchQuery);
+      var filteredKey = 'lrr-checker-v5-alt-strict-' + simpleHash(sourceFullTitle + '|' + searchQuery);
       var cached = getCache(filteredKey);
       if (cached && typeof cached.altHit === 'boolean') {
         if (cached.altHit && generation === lrrScanGeneration)
@@ -1689,6 +1697,7 @@
 
     function extractLooseTitleParts(fullTitle) {
       fullTitle = String(fullTitle || '').trim();
+      try { fullTitle = fullTitle.normalize('NFKC'); } catch (_) {}
       var authorInfo = extractLooseAuthor(fullTitle);
       var tail = authorInfo ? fullTitle.slice(authorInfo.end) : fullTitle;
       tail = tail.replace(/\[[^\]]*\]/g, ' ').replace(/\s+/g, ' ').trim();
@@ -1771,6 +1780,18 @@
       return containment >= 0.88 || dice >= 0.88;
     }
 
+    function buildLooseSearchQueries(searchTitle) {
+      // filter 检索发生在本地相似度校验之前。用连续词段回退，避免空格、波浪线等差异挡住候选。
+      var queries = [searchTitle];
+      var words = stripLooseDecorations(searchTitle).match(/[\p{L}\p{N}]+/gu) || [];
+      words.filter(function (word) { return looseKeyIsUseful(word); })
+        .sort(function (a, b) { return b.length - a.length; })
+        .forEach(function (word) {
+          if (queries.length < 4 && queries.indexOf(word) < 0) queries.push(word);
+        });
+      return queries;
+    }
+
     async function performLooseTitleSearch(searchTitle, sourceFullTitle, titleElement, generation) {
       if (hasLrrMarker(titleElement)) return { success: false, skipped: true };
 
@@ -1778,7 +1799,7 @@
       if (!looseKeyIsUseful(normalizedQuery)) return { success: false, skipped: true };
 
       // 新缓存前缀避免旧版“未命中”缓存阻止新的宽松匹配。
-      var filteredKey = 'lrr-checker-v4-loose-' + simpleHash(sourceFullTitle + '|' + searchTitle);
+      var filteredKey = 'lrr-checker-v5-loose-' + simpleHash(sourceFullTitle + '|' + searchTitle);
       var cached = getCache(filteredKey);
       if (cached && typeof cached.altHit === 'boolean') {
         if (cached.altHit && generation === lrrScanGeneration && !hasLrrMarker(titleElement))
@@ -1786,16 +1807,24 @@
         return { success: cached.altHit, cached: true };
       }
 
-      var rawKey = 'lrr-checker-v4-loose-raw-' + simpleHash(searchTitle);
       try {
-        var result = await runAltSearchLimited(function () {
-          return fetchAltSearchHttp(searchTitle, rawKey);
-        });
-        if (generation !== lrrScanGeneration) return { success: false, stale: true };
-
-        var hits = (result && result.hits ? result.hits : []).filter(function (item) {
-          return item && item.title && isLooseCandidateMatch(sourceFullTitle, searchTitle, item.title);
-        });
+        var queries = buildLooseSearchQueries(searchTitle);
+        var hits = [];
+        for (var i = 0; i < queries.length; i++) {
+          if (generation !== lrrScanGeneration || hasLrrMarker(titleElement))
+            return { success: false, stale: true };
+          var query = queries[i];
+          var rawKey = 'lrr-checker-v5-loose-raw-' + simpleHash(query);
+          var result = await runAltSearchLimited(function () {
+            return fetchAltSearchHttp(query, rawKey);
+          });
+          if (generation !== lrrScanGeneration) return { success: false, stale: true };
+          // 回退词只负责召回，始终用完整标题校验，不能把相同关键词当作相同作品。
+          hits = (result && result.hits ? result.hits : []).filter(function (item) {
+            return item && item.title && isLooseCandidateMatch(sourceFullTitle, searchTitle, item.title);
+          });
+          if (hits.length) break;
+        }
 
         var hit = hits.length > 0;
         setCache(filteredKey, { altHit: hit, altHits: hits });
@@ -2302,7 +2331,7 @@
       <button id="eh-tb-save" class="eh-tb-btn eh-tb-btn-primary">保存并刷新</button>
       <button id="eh-tb-reset" class="eh-tb-btn eh-tb-btn-secondary">恢复默认</button>
     </div>
-    <div class="eh-tb-footer">ExHentai Library Toolkit v1.1.0 | 悬浮按钮开关面板 · 长按标题拖动</div>
+    <div class="eh-tb-footer">ExHentai Library Toolkit v1.1.1 | 悬浮按钮开关面板 · 长按标题拖动</div>
   </div>
 </div>`;
 
@@ -2359,7 +2388,7 @@
       <button id="eh-gdl-save" class="eh-tb-btn eh-gdl-btn-save">保存下载设置</button>
     </div>
     <div class="eh-gdl-hint">仅获取元数据：按“压缩包名称”设置生成带 [仅元数据] 前缀的 ZIP，内含 metadata.json 和 info.json，不下载图片，保存到浏览器下载目录。</div>
-    <div class="eh-tb-footer">ExHentai Library Toolkit v1.1.0 · Pure Browser Downloader · LRR info.json</div>
+    <div class="eh-tb-footer">ExHentai Library Toolkit v1.1.1 · Pure Browser Downloader · LRR info.json</div>
   </div>
 </div>`
 
