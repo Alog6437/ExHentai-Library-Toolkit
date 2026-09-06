@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name        ExHentai Library Toolkit
 // @namespace   https://github.com/Alog6437/ExHentai-Library-Toolkit
-// @version     1.0.6
+// @version     1.0.9
 // @description  ExHentai/E-Hentai 一体化工具：LANraragi 查重、纯浏览器图片 ZIP 下载与元数据打包、快捷收藏、全局搜索、翻译高亮及统一悬浮面板。
 // @description:en  All-in-one ExHentai/E-Hentai toolkit with LANraragi duplicate checking, image ZIP downloads, metadata, favorites, search and translation highlighting.
 // @author      Alog6437
@@ -122,7 +122,7 @@
         ['无需 gallery-dl、Python、Bridge 或本地服务。脚本直接读取图片页、按所选画质下载图片并生成 ZIP；最终文件保存到浏览器当前下载目录。', 'No gallery-dl, Python, Bridge or local service required. The script reads image pages, downloads the selected image quality and creates a ZIP directly in the browser.'],
         ['压缩包名称', 'ZIP Name'], ['默认标题（英文/中文/罗马音）', 'Default title (English/Chinese/Romaji)'],
         ['仅获取元数据 ZIP', 'Download Metadata ZIP'],
-        ['仅获取元数据：按“压缩包名称”设置生成 ZIP，内含 metadata.json 和 info.json，不下载图片，保存到浏览器下载目录。', 'Metadata only: create a ZIP using the ZIP Name setting, containing metadata.json and info.json without images, and save it to the browser download directory.'],
+        ['仅获取元数据：按“压缩包名称”设置生成带 [仅元数据] 前缀的 ZIP，内含 metadata.json 和 info.json，不下载图片，保存到浏览器下载目录。', 'Metadata only: create a ZIP with a [Metadata Only] prefix using the ZIP Name setting, containing metadata.json and info.json without images, and save it to the browser download directory.'],
         ['原文/日文标题（如果有）', 'Original/Japanese title (if available)'], ['ZIP 预览：', 'ZIP Preview: '],
         ['下载内容', 'Download Contents'], ['下载原画（取消后下载压缩/缩放图）', 'Download original images (uncheck for compressed/resized images)'],
         ['图片按 001.ext、002.ext… 顺序命名', 'Name images sequentially as 001.ext, 002.ext…'],
@@ -230,6 +230,19 @@
     var galleryDlBusy = false;
     var CRC32_TABLE = null;
     var ZIP32_MAX = 0xffffffff;
+
+    function warnBeforeLeavingDownload(event) {
+      if (!galleryDlBusy) return;
+      event.preventDefault();
+      // Modern browsers display their own confirmation text for beforeunload.
+      event.returnValue = '';
+    }
+
+    function setGalleryDownloadBusy(busy) {
+      galleryDlBusy = busy;
+      if (busy) window.addEventListener('beforeunload', warnBeforeLeavingDownload);
+      else window.removeEventListener('beforeunload', warnBeforeLeavingDownload);
+    }
 
     function galleryRawRequest(options) {
       return new Promise(function (resolve, reject) {
@@ -772,9 +785,9 @@
       if (!info) { updateGalleryDlStatus(statusBox, 'offline', t('无法下载', 'Cannot download'), t('请在图库详情页操作', 'Please use this on a gallery detail page')); return; }
       var cfg = readGalleryDlPanelConfig(panel);
       var selectedTitle = sanitizeGalleryTitle(chooseGalleryTitle(info, cfg.galleryDlTitleMode));
-      var zipName = selectedTitle + '.zip';
+      var zipName = t('[仅元数据] ', '[Metadata Only] ') + selectedTitle + '.zip';
       var zip = null;
-      galleryDlBusy = true;
+      setGalleryDownloadBusy(true);
       updateGalleryDlPreview(panel);
       button.textContent = t('正在获取元数据…', 'Fetching metadata…');
       var metrics = statusBox.querySelector('#eh-gdl-metrics');
@@ -793,7 +806,7 @@
         updateGalleryDlStatus(statusBox, 'offline', t('元数据下载失败', 'Metadata download failed'), e.message);
       } finally {
         if (zip) { try { await zip.cleanup(); } catch (cleanupError) {} }
-        galleryDlBusy = false;
+        setGalleryDownloadBusy(false);
         button.textContent = t('仅获取元数据 ZIP', 'Download Metadata ZIP');
         updateGalleryDlPreview(panel);
       }
@@ -808,7 +821,7 @@
       var zipName = selectedTitle + '.zip';
       var tempName = '.eh-pure-' + info.gid + '-' + Date.now() + '.zip';
       var zip = null;
-      galleryDlBusy = true;
+      setGalleryDownloadBusy(true);
       updateGalleryDlPreview(panel);
       if (button) { button.disabled = true; button.textContent = t('下载中…', 'Downloading…'); }
       updateGalleryDlMetrics(statusBox, { workers: cfg.galleryDlParallel, total_pages: info.page_count || 0 }, true);
@@ -909,7 +922,7 @@
         if (zip) { try { await zip.abort(); } catch (abortError) {} }
         updateGalleryDlStatus(statusBox, 'offline', t('下载失败', 'Download failed'), e.message);
       } finally {
-        galleryDlBusy = false;
+        setGalleryDownloadBusy(false);
         if (button) { button.disabled = false; button.textContent = t('下载当前图库', 'Download Gallery'); }
         updateGalleryDlPreview(panel);
       }
@@ -2348,7 +2361,7 @@
       <button id="eh-gdl-metadata" class="eh-tb-btn eh-tb-btn-secondary">仅获取元数据 ZIP</button>
       <button id="eh-gdl-save" class="eh-tb-btn eh-gdl-btn-save">保存下载设置</button>
     </div>
-    <div class="eh-gdl-hint">仅获取元数据：按“压缩包名称”设置生成 ZIP，内含 metadata.json 和 info.json，不下载图片，保存到浏览器下载目录。</div>
+    <div class="eh-gdl-hint">仅获取元数据：按“压缩包名称”设置生成带 [仅元数据] 前缀的 ZIP，内含 metadata.json 和 info.json，不下载图片，保存到浏览器下载目录。</div>
     <div class="eh-tb-footer">ExHentai Library Toolkit v1.0.2 · Pure Browser Downloader · LRR info.json</div>
   </div>
 </div>`

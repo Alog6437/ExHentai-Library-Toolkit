@@ -5,6 +5,42 @@ const vm = require('node:vm');
 const { test } = require('node:test');
 
 const source = fs.readFileSync(path.join(__dirname, '../ExHentai_Library_Toolkit.user.js'), 'utf8');
+test('unfinished downloads request native leave confirmation and remove it when settled', () => {
+  const listeners = new Map();
+  const ctx = load('    function warnBeforeLeavingDownload(', '    function galleryRawRequest(', {
+    galleryDlBusy: false,
+    window: {
+      addEventListener: (name, fn) => listeners.set(name, fn),
+      removeEventListener: (name, fn) => { if (listeners.get(name) === fn) listeners.delete(name); },
+    },
+  });
+  let prevented = 0;
+  const event = { preventDefault: () => prevented++ };
+  ctx.warnBeforeLeavingDownload(event);
+  assert.equal(prevented, 0);
+  for (let task = 0; task < 2; task++) {
+    ctx.setGalleryDownloadBusy(true);
+    assert.equal(listeners.size, 1);
+    listeners.get('beforeunload')(event);
+    assert.equal(event.returnValue, '');
+    // Cancelling the browser prompt keeps the task protected.
+    assert.equal(ctx.galleryDlBusy, true);
+    assert.equal(listeners.size, 1);
+    ctx.setGalleryDownloadBusy(false);
+    assert.equal(listeners.size, 0);
+  }
+  assert.equal(prevented, 2);
+  for (const name of ['startGalleryMetadataDownload', 'startGalleryDlDownload']) {
+    const start = source.indexOf('    async function ' + name + '(');
+    const end = name === 'startGalleryMetadataDownload'
+      ? source.indexOf('    async function startGalleryDlDownload(', start)
+      : source.indexOf('    var CACHE_DURATION', start);
+    const body = source.slice(start, end);
+    assert.match(body, /setGalleryDownloadBusy\(true\)/);
+    assert.match(body, /finally\s*\{[\s\S]*setGalleryDownloadBusy\(false\)/);
+  }
+});
+
 function load(start, end, globals = {}) {
   const context = vm.createContext(globals);
   const from = source.indexOf(start);
