@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name        ExHentai Library Toolkit
 // @namespace   https://github.com/Alog6437/ExHentai-Library-Toolkit
-// @version     1.0.2
+// @version     1.0.6
 // @description  ExHentai/E-Hentai 一体化工具：LANraragi 查重、纯浏览器图片 ZIP 下载与元数据打包、快捷收藏、全局搜索、翻译高亮及统一悬浮面板。
 // @description:en  All-in-one ExHentai/E-Hentai toolkit with LANraragi duplicate checking, image ZIP downloads, metadata, favorites, search and translation highlighting.
 // @author      Alog6437
@@ -55,6 +55,7 @@
     enableQuickFav: true,       // 无弹窗收藏（详情页+列表页）
     enableGlobalSearch: true,   // 全局搜索栏
     enableChineseHighlight: true, // 中文翻译高亮
+    enableUncensoredLabel: true, // 根据 uncensored 标签显示无修正标记
     defaultFavcat: 0,           // 默认收藏夹编号 0-9
 
     // --- UI 面板 ---
@@ -110,7 +111,7 @@
         ['LRR 服务器', 'LRR Server'], ['可选', 'Optional'],
         ['主查重并发', 'Primary concurrency'], ['备用搜索并发', 'Alt-search concurrency'],
         ['浏览体验增强', 'Browsing Enhancements'], ['无弹窗收藏', 'Quick favorites'],
-        ['全局搜索栏', 'Global search bar'], ['中文翻译高亮', 'English translation highlight'],
+        ['无修正标签', 'Uncensored label'], ['全局搜索栏', 'Global search bar'], ['中文翻译高亮', 'English translation highlight'],
         ['默认收藏夹', 'Default favorite category'], ['高级', 'Advanced'],
         ['控制台日志', 'Console logging'], ['LRR Debug 模式', 'LRR Debug mode'],
         ['LRR：等待检测', 'LRR: Waiting for check'], ['将自动检测服务器状态', 'Server status will be checked automatically'],
@@ -120,6 +121,8 @@
         ['长按拖动', 'Hold to drag'], ['图片 ZIP 下载', 'Image ZIP Download'], ['保存方式', 'Save Method'],
         ['无需 gallery-dl、Python、Bridge 或本地服务。脚本直接读取图片页、按所选画质下载图片并生成 ZIP；最终文件保存到浏览器当前下载目录。', 'No gallery-dl, Python, Bridge or local service required. The script reads image pages, downloads the selected image quality and creates a ZIP directly in the browser.'],
         ['压缩包名称', 'ZIP Name'], ['默认标题（英文/中文/罗马音）', 'Default title (English/Chinese/Romaji)'],
+        ['仅获取元数据 ZIP', 'Download Metadata ZIP'],
+        ['仅获取元数据：按“压缩包名称”设置生成 ZIP，内含 metadata.json 和 info.json，不下载图片，保存到浏览器下载目录。', 'Metadata only: create a ZIP using the ZIP Name setting, containing metadata.json and info.json without images, and save it to the browser download directory.'],
         ['原文/日文标题（如果有）', 'Original/Japanese title (if available)'], ['ZIP 预览：', 'ZIP Preview: '],
         ['下载内容', 'Download Contents'], ['下载原画（取消后下载压缩/缩放图）', 'Download original images (uncheck for compressed/resized images)'],
         ['图片按 001.ext、002.ext… 顺序命名', 'Name images sequentially as 001.ext, 002.ext…'],
@@ -342,6 +345,8 @@
       var preview = panel.querySelector('#eh-gdl-title-preview');
       var pagePreview = panel.querySelector('#eh-gdl-page-preview');
       var downloadBtn = panel.querySelector('#eh-gdl-download');
+      var metadataBtn = panel.querySelector('#eh-gdl-metadata');
+      if (metadataBtn) metadataBtn.disabled = !info || galleryDlBusy;
       var modeNode = panel.querySelector('input[name="cfg-galleryDlTitleMode"]:checked');
       var mode = modeNode ? modeNode.value : 'default';
       if (!info) {
@@ -353,7 +358,7 @@
       var selected = chooseGalleryTitle(info, mode);
       if (preview) preview.textContent = sanitizeGalleryTitle(selected) + '.zip';
       if (pagePreview) pagePreview.textContent = info.page_count ? t(' · ' + info.page_count + ' 页', ' · ' + info.page_count + ' pages') : t(' · 页数待 API 确认', ' · Page count pending API');
-      if (downloadBtn && !galleryDlBusy) downloadBtn.disabled = false;
+      if (downloadBtn) downloadBtn.disabled = galleryDlBusy;
     }
 
     function updateGalleryDlStatus(box, state, main, detail) {
@@ -761,6 +766,39 @@
       } finally { if (button) button.disabled = false; }
     }
 
+    async function startGalleryMetadataDownload(panel, statusBox, button) {
+      if (galleryDlBusy) return;
+      var info = getCurrentGalleryInfo();
+      if (!info) { updateGalleryDlStatus(statusBox, 'offline', t('无法下载', 'Cannot download'), t('请在图库详情页操作', 'Please use this on a gallery detail page')); return; }
+      var cfg = readGalleryDlPanelConfig(panel);
+      var selectedTitle = sanitizeGalleryTitle(chooseGalleryTitle(info, cfg.galleryDlTitleMode));
+      var zipName = selectedTitle + '.zip';
+      var zip = null;
+      galleryDlBusy = true;
+      updateGalleryDlPreview(panel);
+      button.textContent = t('正在获取元数据…', 'Fetching metadata…');
+      var metrics = statusBox.querySelector('#eh-gdl-metrics');
+      if (metrics) metrics.style.display = 'none';
+      try {
+        await saveGalleryDlConfig(panel);
+        updateGalleryDlStatus(statusBox, 'checking', t('正在读取元数据', 'Reading metadata'), info.url);
+        var apiMeta = await fetchGalleryApiMetadata(info);
+        zip = new StreamingZipWriter(new MemoryZipSink());
+        await zip.add('metadata.json', new TextEncoder().encode(JSON.stringify(buildMetadata(info, apiMeta, selectedTitle, 0, cfg.galleryDlOriginal), null, 2)));
+        await zip.add('info.json', new TextEncoder().encode(JSON.stringify(buildEzeInfo(info, apiMeta), null, 2)));
+        var blob = await zip.finish();
+        triggerZipDownload(blob, zipName);
+        updateGalleryDlStatus(statusBox, 'online', t('元数据 ZIP 已生成', 'Metadata ZIP created'), zipName + ' · metadata.json + info.json');
+      } catch (e) {
+        updateGalleryDlStatus(statusBox, 'offline', t('元数据下载失败', 'Metadata download failed'), e.message);
+      } finally {
+        if (zip) { try { await zip.cleanup(); } catch (cleanupError) {} }
+        galleryDlBusy = false;
+        button.textContent = t('仅获取元数据 ZIP', 'Download Metadata ZIP');
+        updateGalleryDlPreview(panel);
+      }
+    }
+
     async function startGalleryDlDownload(panel, statusBox, button) {
       if (galleryDlBusy) return;
       var info = getCurrentGalleryInfo();
@@ -771,6 +809,7 @@
       var tempName = '.eh-pure-' + info.gid + '-' + Date.now() + '.zip';
       var zip = null;
       galleryDlBusy = true;
+      updateGalleryDlPreview(panel);
       if (button) { button.disabled = true; button.textContent = t('下载中…', 'Downloading…'); }
       updateGalleryDlMetrics(statusBox, { workers: cfg.galleryDlParallel, total_pages: info.page_count || 0 }, true);
       try {
@@ -792,8 +831,13 @@
         var failed = null;
         var writeChain = Promise.resolve();
 
+        var lastMetricsUpdate = 0;
         function refreshMetrics(status) {
-          var seconds = Math.max(0.25, (Date.now() - stats.started) / 1000);
+          var now = Date.now();
+          // Throttle only progress rendering; ZIP/final states always update immediately.
+          if (status === 'downloading' && now - lastMetricsUpdate < 100) return;
+          lastMetricsUpdate = now;
+          var seconds = Math.max(0.25, (now - stats.started) / 1000);
           updateGalleryDlMetrics(statusBox, {
             status: status || 'downloading', speed_bps: stats.networkBytes / seconds,
             downloaded_bytes: stats.savedBytes, downloaded_files: stats.done,
@@ -1128,7 +1172,7 @@
 
     function getGalleryTitlePlain(titleElement) {
       var clone = titleElement.cloneNode(true);
-      clone.querySelectorAll('.lrr-marker-span').forEach(function (el) { el.remove(); });
+      clone.querySelectorAll('.eh-gallery-markers, .lrr-marker-span, .eh-uncensored-marker').forEach(function (el) { el.remove(); });
       return clone.textContent.replace(/\s+/g, ' ').trim();
     }
 
@@ -1194,17 +1238,118 @@
         openLrrSearch(keyword);
       }, true);
 
-      // Thumbnail 模式把 LRR 标签叠加到封面左上角，不再挤压/截断标题。
-      var thumbItem = titleElement.matches && titleElement.matches('.gl4t.glname') ? titleElement.closest('.gl1t') : null;
-      var thumbHost = thumbItem ? thumbItem.querySelector('.gl3t') : null;
-      if (thumbHost) {
-        thumbHost.classList.add('eh-lrr-marker-host');
-        markerSpan.classList.add('lrr-marker-thumbnail');
-        thumbHost.appendChild(markerSpan);
+      var group = getGalleryMarkerGroup(titleElement);
+      group.insertBefore(markerSpan, group.firstChild);
+    }
+
+    // Shared row keeps duplicate and uncensored badges side by side in every list mode.
+    function getGalleryMarkerGroup(titleElement) {
+      var scope = getLrrMarkerScope(titleElement) || titleElement;
+      var group = scope.querySelector('.eh-gallery-markers');
+      if (group) return group;
+      group = document.createElement('span');
+      group.className = 'eh-gallery-markers';
+      var item = titleElement.matches('.gl4t.glname') ? titleElement.closest('.gl1t') : null;
+      var host = item ? item.querySelector('.gl3t') : null;
+      if (host) {
+        host.classList.add('eh-lrr-marker-host');
+        group.classList.add('eh-gallery-markers-thumbnail');
+        host.appendChild(group);
       } else {
-        titleElement.insertBefore(markerSpan, titleElement.firstChild);
+        titleElement.insertBefore(group, titleElement.firstChild);
+      }
+      return group;
+    }
+
+    function hasUncensoredTag(tags) {
+      return Array.isArray(tags) && tags.some(function (tag) {
+        return /^(?:misc:|other:)?uncensored$/i.test(String(tag).trim());
+      });
+    }
+
+    function renderUncensoredLabel(titleElement, enabled) {
+      if (!titleElement || !titleElement.isConnected) return;
+      var scope = getLrrMarkerScope(titleElement) || titleElement;
+      var marker = scope.querySelector('.eh-uncensored-marker');
+      if (!enabled) { if (marker) marker.remove(); return; }
+      if (marker) return;
+      marker = document.createElement('span');
+      marker.className = 'eh-uncensored-marker';
+      marker.textContent = t('无修正', 'Uncensored');
+      marker.title = 'uncensored';
+      getGalleryMarkerGroup(titleElement).appendChild(marker);
+    }
+
+    var uncensoredTagCache = new Map();
+    var uncensoredScanBusy = false;
+    var uncensoredScanTimer = null;
+
+    async function scanUncensoredLabels() {
+      if (!CONFIG.enableUncensoredLabel || uncensoredScanBusy) return;
+      var entries = collectLrrGalleryEntries();
+      var pending = [];
+      entries.forEach(function (entry) {
+        var cached = uncensoredTagCache.get(entry.key);
+        if (cached && cached.expires > Date.now()) {
+          renderUncensoredLabel(entry.titleElement, cached.value);
+        } else pending.push(entry);
+      });
+      if (!pending.length) return;
+      uncensoredScanBusy = true;
+      try {
+        // Batch metadata requests so thumbnail lists do not require one request per gallery.
+        for (var i = 0; i < pending.length; i += 25) {
+          var batch = pending.slice(i, i + 25);
+          try {
+            var apiUrl = /exhentai\.org$/i.test(window.location.hostname) ? 'https://exhentai.org/api.php' : 'https://api.e-hentai.org/api.php';
+            var body = JSON.stringify({ method: 'gdata', gidlist: batch.map(function (entry) {
+              var identity = extractGalleryIdentity(entry.galleryUrl);
+              return [Number(identity.gid), identity.token];
+            }), namespace: 1 });
+            var response = await galleryTextRequest(apiUrl, 'POST', body, { 'Content-Type': 'application/json' }, 30000);
+            var metadata = JSON.parse(response.text || '{}').gmetadata;
+            if (!Array.isArray(metadata)) throw new Error('Missing gallery metadata');
+            var metadataByGid = new Map();
+            metadata.forEach(function (value) { if (value) metadataByGid.set(String(value.gid), value); });
+            batch.forEach(function (entry) {
+              var identity = extractGalleryIdentity(entry.galleryUrl);
+              var meta = metadataByGid.get(String(identity.gid));
+              if (!meta || !Array.isArray(meta.tags)) {
+                uncensoredTagCache.set(entry.key, { value: false, expires: Date.now() + 60000 });
+                return;
+              }
+              var value = hasUncensoredTag(meta.tags);
+              uncensoredTagCache.set(entry.key, { value: value, expires: Date.now() + 5 * 60 * 1000 });
+              renderUncensoredLabel(entry.titleElement, value);
+            });
+          } catch (e) {
+            batch.forEach(function (entry) { uncensoredTagCache.set(entry.key, { value: false, expires: Date.now() + 60000 }); });
+            warn('[EH Uncensored] metadata request failed:', e);
+          }
+        }
+      } finally {
+        uncensoredScanBusy = false;
+        // Restore markers if the list was replaced while metadata was being fetched.
+        scheduleUncensoredScan();
       }
     }
+
+    function scheduleUncensoredScan() {
+      if (!CONFIG.enableUncensoredLabel) return;
+      if (uncensoredScanTimer) clearTimeout(uncensoredScanTimer);
+      uncensoredScanTimer = setTimeout(function () {
+        uncensoredScanTimer = null;
+        scanUncensoredLabels().catch(function (e) { warn('[EH Uncensored]', e); });
+      }, 300);
+    }
+
+    function setupUncensoredLabels() {
+      if (!CONFIG.enableUncensoredLabel) return;
+      scheduleUncensoredScan();
+      setupGalleryListObserver();
+      window.addEventListener('pageshow', scheduleUncensoredScan, false);
+    }
+
 
     function getAuthorizationHeaderValue(apiKey) {
       if (!apiKey) return '';
@@ -1719,6 +1864,9 @@
       var entries = new Map();
       var links = document.querySelectorAll('.itg a[href*="/g/"]');
       links.forEach(function (linkElement) {
+        // A cover and its title often link to the same gallery. Resolve its DOM only once.
+        var identity = extractGalleryIdentity(linkElement.href);
+        if (!identity || entries.has(identity.gid + '/' + identity.token)) return;
         var entry = getLrrGalleryEntryFromLink(linkElement);
         if (!entry || entries.has(entry.key)) return;
         entries.set(entry.key, entry);
@@ -1792,6 +1940,17 @@
     }
 
     function lrrMutationTouchesList(mutation) {
+      var markerSelector = '.eh-gallery-markers, .lrr-marker-span, .eh-uncensored-marker';
+      var changedTarget = mutation.target;
+      // Adding our own badges cannot introduce galleries. Keep removals observable so
+      // badges deleted by the page are still restored on the next scan.
+      if (!mutation.removedNodes.length && mutation.addedNodes.length) {
+        if (changedTarget && changedTarget.nodeType === 1 && changedTarget.closest(markerSelector)) return false;
+        var onlyMarkers = Array.prototype.every.call(mutation.addedNodes, function (node) {
+          return node.nodeType === 1 && node.matches(markerSelector);
+        });
+        if (onlyMarkers) return false;
+      }
       function touches(node) {
         if (!node || node.nodeType !== 1) return false;
         if (node.matches && node.matches('.itg, .glink, .gl4t.glname, a[href*="/g/"]')) return true;
@@ -1803,6 +1962,19 @@
       for (i = 0; i < mutation.addedNodes.length; i++) if (touches(mutation.addedNodes[i])) return true;
       for (i = 0; i < mutation.removedNodes.length; i++) if (touches(mutation.removedNodes[i])) return true;
       return false;
+    }
+
+    function setupGalleryListObserver() {
+      if (lrrDomObserver || typeof MutationObserver === 'undefined') return;
+      lrrDomObserver = new MutationObserver(function (mutations) {
+        for (var i = 0; i < mutations.length; i++) {
+          if (!lrrMutationTouchesList(mutations[i])) continue;
+          scheduleLrrDomScan();
+          scheduleUncensoredScan();
+          break;
+        }
+      });
+      lrrDomObserver.observe(document.documentElement, { childList: true, subtree: true });
     }
 
     function setupLrrChecker() {
@@ -1819,17 +1991,7 @@
       setTimeout(function () { scheduleLrrDomScan(0); }, 1200);
 
       // 不再只观察“初始化瞬间存在的 .itg”。首页/收藏夹若稍后生成或重绘列表，也能自动重新挂上查重。
-      if (!lrrDomObserver && typeof MutationObserver !== 'undefined') {
-        lrrDomObserver = new MutationObserver(function (mutations) {
-          for (var i = 0; i < mutations.length; i++) {
-            if (lrrMutationTouchesList(mutations[i])) {
-              scheduleLrrDomScan();
-              break;
-            }
-          }
-        });
-        lrrDomObserver.observe(document.documentElement, { childList: true, subtree: true });
-      }
+      setupGalleryListObserver();
 
       // BFCache/页面恢复后主动补扫，避免“悬浮球恢复了但查重没有恢复”。
       window.addEventListener('pageshow', function () { scheduleLrrDomScan(0); }, false);
@@ -2098,9 +2260,12 @@
 
     <div class="eh-tb-section eh-lrr-section">
       <div class="eh-tb-section-title">浏览体验增强</div>
-      <div class="eh-tb-row eh-lrr-choice"><label><input type="checkbox" id="cfg-enableQuickFav"> 无弹窗收藏</label></div>
-      <div class="eh-tb-row eh-lrr-choice"><label><input type="checkbox" id="cfg-enableGlobalSearch"> 全局搜索栏</label></div>
-      <div class="eh-tb-row eh-lrr-choice"><label><input type="checkbox" id="cfg-enableChineseHighlight"> 中文翻译高亮</label></div>
+      <div class="eh-tb-row eh-browsing-options">
+        <label><input type="checkbox" id="cfg-enableQuickFav"> 无弹窗收藏</label>
+        <label><input type="checkbox" id="cfg-enableGlobalSearch"> 全局搜索栏</label>
+        <label><input type="checkbox" id="cfg-enableChineseHighlight"> 中文翻译高亮</label>
+        <label><input type="checkbox" id="cfg-enableUncensoredLabel"> 无修正标签</label>
+      </div>
       <div class="eh-tb-row eh-lrr-fav-row"><label class="eh-lrr-field"><span>默认收藏夹</span><input type="number" id="cfg-defaultFavcat" class="eh-tb-input-num" min="0" max="9" value="0"><small>0～9</small></label></div>
     </div>
 
@@ -2180,8 +2345,10 @@
       <button id="eh-gdl-download" class="eh-tb-btn eh-gdl-btn-primary">下载当前图库</button>
     </div>
     <div class="eh-tb-actions eh-gdl-actions">
+      <button id="eh-gdl-metadata" class="eh-tb-btn eh-tb-btn-secondary">仅获取元数据 ZIP</button>
       <button id="eh-gdl-save" class="eh-tb-btn eh-gdl-btn-save">保存下载设置</button>
     </div>
+    <div class="eh-gdl-hint">仅获取元数据：按“压缩包名称”设置生成 ZIP，内含 metadata.json 和 info.json，不下载图片，保存到浏览器下载目录。</div>
     <div class="eh-tb-footer">ExHentai Library Toolkit v1.0.2 · Pure Browser Downloader · LRR info.json</div>
   </div>
 </div>`
@@ -2282,6 +2449,8 @@
 #eh-toolbox-panel .eh-tb-row { margin-bottom: 7px; color: #d8d9e8; }
 #eh-toolbox-panel .eh-tb-row:last-child { margin-bottom: 0; }
 #eh-toolbox-panel .eh-lrr-choice label { gap: 9px; min-height: 25px; }
+#eh-toolbox-panel .eh-browsing-options { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 4px 10px; }
+#eh-toolbox-panel .eh-browsing-options label { flex-wrap: nowrap; gap: 6px; min-width: 0; min-height: 24px; line-height: 1.35; }
 #eh-toolbox-panel .eh-lrr-field {
   display: grid; grid-template-columns: 92px minmax(0,1fr); align-items: center;
   gap: 10px; width: 100%; cursor: default; line-height: 1.35;
@@ -2487,7 +2656,7 @@
 .eh-tb-footer { text-align: center; font-size: 10px; color: rgba(255,255,255,0.2); padding: 4px 0 6px; }
 
 /* LRR Marker 样式 */
-.lrr-marker-span {
+.lrr-marker-span, .eh-uncensored-marker {
   z-index:20;
   font-weight: 700; border-radius: 4px; padding: 1px 5px; margin-right: 4px;
   font-size: 0.96em; position: relative; display: inline-block;
@@ -2496,13 +2665,19 @@
 .lrr-marker-span:hover { filter: brightness(1.2); transform: translateY(-1px); z-index:999999 !important; }
 /* Thumbnail 模式：LRR 标签作为封面角标，不参与标题排版，避免把标题挤成竖排/截断。 */
 .gl3t.eh-lrr-marker-host { position: relative !important; }
-.gl3t.eh-lrr-marker-host > .lrr-marker-thumbnail {
+.gl3t.eh-lrr-marker-host > .eh-gallery-markers-thumbnail {
   position: absolute !important; top: 6px; left: 6px; margin: 0 !important;
   z-index: 60 !important; line-height: 1.45; white-space: nowrap;
   font-size: 14px !important; font-weight: 800 !important;
   border-radius: 6px; padding: 3px 9px; letter-spacing: .2px;
   box-shadow: 0 2px 8px rgba(0,0,0,.55);
 }
+.eh-gallery-markers { display: inline-flex; align-items: center; gap: 4px; white-space: nowrap; vertical-align: middle; margin-right: 4px; }
+.eh-gallery-markers:empty { display: none; }
+.eh-gallery-markers > span { margin-right: 0; flex: none; }
+.gl3t.eh-lrr-marker-host > .eh-gallery-markers-thumbnail { padding: 0; box-shadow: none; }
+.eh-gallery-markers-thumbnail > span { padding: 3px 7px; border-radius: 6px; box-shadow: 0 2px 8px rgba(0,0,0,.55); }
+.eh-uncensored-marker { color: #fff; background: #b45309; cursor: default; }
 .lrr-marker-downloaded { color: #fff; background: linear-gradient(135deg, #28a745, #49995d); }
 .lrr-marker-file { color: #fff; background: linear-gradient(135deg, #356ddc, #894ab0); }
 .lrr-marker-error { color: #fff; background: linear-gradient(135deg, #dc3545, #e05656); }
@@ -2668,6 +2843,8 @@
       });
       testBtn.addEventListener('click', function () { testGalleryDownloader(panel, statusBox, testBtn); });
       downloadBtn.addEventListener('click', function () { startGalleryDlDownload(panel, statusBox, downloadBtn); });
+      var metadataBtn = panel.querySelector('#eh-gdl-metadata');
+      metadataBtn.addEventListener('click', function () { startGalleryMetadataDownload(panel, statusBox, metadataBtn); });
       updateGalleryDlPreview(panel);
     }
 
@@ -2754,6 +2931,7 @@ document.body.appendChild(panel);
         'enableQuickFav': 'cfg-enableQuickFav',
         'enableGlobalSearch': 'cfg-enableGlobalSearch',
         'enableChineseHighlight': 'cfg-enableChineseHighlight',
+        'enableUncensoredLabel': 'cfg-enableUncensoredLabel',
         'enableLogging': 'cfg-enableLogging',
         'lrrDebugMode': 'cfg-lrrDebugMode',
       };
@@ -2920,12 +3098,19 @@ document.body.appendChild(panel);
       else setTimeout(run, 0);
     }
 
+    function removedFloatingUi(mutation) {
+      var selector = '#eh-toolbox-panel, #eh-gallerydl-panel, #eh-toolbox-style, .eh-lrr-float-ball, .eh-gdl-float-ball';
+      return Array.prototype.some.call(mutation.removedNodes || [], function (node) {
+        return node.nodeType === 1 && (node.matches(selector) || !!node.querySelector(selector));
+      });
+    }
+
     function startUiWatchdog() {
       if (!uiWatchdogTimer) uiWatchdogTimer = setInterval(ensureFloatingUi, 2000);
       if (!uiWatchdogObserver && typeof MutationObserver !== 'undefined') {
         uiWatchdogObserver = new MutationObserver(function (mutations) {
           for (var i = 0; i < mutations.length; i++) {
-            if (mutations[i].removedNodes && mutations[i].removedNodes.length) {
+            if (removedFloatingUi(mutations[i])) {
               scheduleEnsureFloatingUi();
               break;
             }
@@ -2954,6 +3139,7 @@ document.body.appendChild(panel);
       safeRunFeature('全局搜索', setupGlobalSearch);
       safeRunFeature('列表页收藏', setupListPageFav);
       safeRunFeature('中文高亮', setupChineseHighlight);
+      safeRunFeature('无修正标签', setupUncensoredLabels);
       safeRunFeature('油猴菜单', registerUserscriptMenu);
 
       // 页面脚本若在初始化过程中改写DOM，再补一次。
