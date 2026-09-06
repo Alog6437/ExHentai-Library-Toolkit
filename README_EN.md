@@ -1,5 +1,7 @@
 # ExHentai Library Toolkit
 
+**Current version: 1.1.0**
+
 All-in-one userscript for ExHentai/E-Hentai: LANraragi duplicate checking, original image ZIP downloads with metadata, favorites, search, and UI enhancements.
 
 **[简体中文](README.md) | English**
@@ -23,10 +25,25 @@ It combines LANraragi duplicate checking, browser-based original image downloads
 
 ### Original Image ZIP Downloads
 
-- Download original images directly through the browser.
+- Download original images directly through the browser, or choose compressed/resized images.
 - Save images using sequential numbering.
 - Automatically package downloaded files into a ZIP archive.
-- Include related metadata for easier archiving and library management.
+- Optionally include metadata.json and LANraragi-compatible info.json.
+- Use the ZIP Name setting to choose the default or original/Japanese title; archives go to the browser download directory.
+- While downloading or packaging, refreshing, closing or leaving the page requests the browser's native confirmation. Cancel to keep the task running; leaving interrupts it. The browser controls the wording, and protection is removed when the task completes or fails.
+
+### Metadata-Only ZIP Downloads
+
+On a gallery detail page, open the download panel, choose the title type, and click “Download Metadata ZIP”. The archive contains only metadata.json and info.json, without downloading images or requiring a local directory picker.
+
+Filenames use `[Metadata Only] Gallery title.zip` in English or `[仅元数据] 图库标题.zip` in Chinese. Full gallery downloads still use `Gallery title.zip`.
+
+### Uncensored Labels
+
+- An independent “Uncensored label” switch sits beside translation highlighting. It is enabled by default and applies after saving settings.
+- Detection uses the gallery's actual uncensored tag, not its title, and works independently of LANraragi checking.
+- Badges appear beside duplicate-check badges: at the top left of covers in thumbnail mode and before titles in other list modes.
+- Dynamic list rescans, batch queries and short-lived caching reduce repeated requests.
 
 ### Quick Favorites
 
@@ -40,11 +57,19 @@ It combines LANraragi duplicate checking, browser-based original image downloads
 
 ### Browsing & UI Enhancements
 
-- Highlight Chinese-translated content.
+- Highlight translations according to the interface language: Chinese translations in Chinese mode and English translations in English mode.
 - Display LANraragi matching status.
 - Display download-related status.
 - Provide a unified floating toolbox.
-- Include multiple configurable browsing enhancements.
+- Arrange quick favorites, global search, translation highlighting and uncensored labels in a compact two-column, two-row layout.
+- Share list observation, skip scans caused by badge insertion, and render download progress at most 10 times per second; final states update immediately.
+
+### Floating Panel Controls
+
+- Click the tools floating button to open settings and hide the download panel; click it again to close settings.
+- Click the download floating button to open downloads and hide settings; click it again to close downloads.
+- Only one panel is visible at a time. Moving the pointer away or clicking outside does not close it. Panel contents stay expanded without automatic collapsing.
+- Hold the header to drag a panel; clicking it does not collapse it. Switching or hiding panels does not stop a running download.
 
 ## Installation
 
@@ -52,6 +77,16 @@ Install a userscript manager first, such as:
 
 - Tampermonkey
 - Violentmonkey
+
+### Install by Searching the Script Site
+
+1. Sign in to your [Greasy Fork](https://greasyfork.org/en/) account and enable adult content in your account settings.
+2. Search for **ExHentai Library Toolkit**, open its script page, click Install, and confirm in your userscript manager.
+3. Refresh ExHentai / E-Hentai after installation.
+
+These account settings belong to the Greasy Fork script site. You can also search for adult scripts on [Sleazy Fork](https://sleazyfork.org/en/).
+
+### Install from the Repository
 
 Then open and install the following script with your userscript manager:
 
@@ -92,6 +127,24 @@ LRR ≈
 ```
 
 Indicates that a possible match was found through fallback searching. Manual confirmation through the LANraragi search result is recommended.
+
+## Version 1.1.0 Changes
+
+- Metadata-only ZIP downloads with a distinctive filename prefix.
+- Leave-page confirmation for unfinished downloads.
+- Uncensored badges and compact browsing settings.
+- Fewer repeated DOM scans, duplicate link lookups and unrelated UI checks, while retaining download concurrency settings and the existing retry policy.
+
+## Development Checks
+
+With Node.js installed, run:
+
+```sh
+node --check ExHentai_Library_Toolkit.user.js
+node --test tests/performance-regression.cjs
+```
+
+Regression tests cover leave-page protection, DOM observation, caching and progress rendering. Native browser prompts and real-site interactions still require browser testing.
 
 ## Credits & Origin
 

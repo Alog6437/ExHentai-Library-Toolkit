@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name        ExHentai Library Toolkit
 // @namespace   https://github.com/Alog6437/ExHentai-Library-Toolkit
-// @version     1.0.9
+// @version     1.1.0
 // @description  ExHentai/E-Hentai 一体化工具：LANraragi 查重、纯浏览器图片 ZIP 下载与元数据打包、快捷收藏、全局搜索、翻译高亮及统一悬浮面板。
 // @description:en  All-in-one ExHentai/E-Hentai toolkit with LANraragi duplicate checking, image ZIP downloads, metadata, favorites, search and translation highlighting.
 // @author      Alog6437
@@ -59,7 +59,6 @@
     defaultFavcat: 0,           // 默认收藏夹编号 0-9
 
     // --- UI 面板 ---
-    panelCollapsed: false,
   };
 
   function gmGet(key, fallback) {
@@ -101,7 +100,7 @@
   function localizeHtml(html) {
     if (CONFIG.uiLanguage === 'en') {
       var pairs = [
-        ['点击展开/收起', 'Click to expand/collapse'],
+        ['长按拖动', 'Click to expand/collapse'],
         ['界面语言 / Language', 'Interface Language'],
         ['语言 / Language', 'Language'],
         ['Lanraragi 查重', 'LANraragi Duplicate Check'],
@@ -117,7 +116,7 @@
         ['LRR：等待检测', 'LRR: Waiting for check'], ['将自动检测服务器状态', 'Server status will be checked automatically'],
         ['重新扫描当前页', 'Rescan current page'], ['测试LRR连接', 'Test LRR connection'],
         ['清空全部LRR缓存', 'Clear all LRR cache'], ['保存并刷新', 'Save & Reload'], ['恢复默认', 'Restore Defaults'],
-        ['鼠标离开3秒自动收起 · 长按标题拖动', 'Auto-collapse after 3s · Hold title to drag'],
+        ['悬浮按钮开关面板 · 长按标题拖动', 'Auto-collapse after 3s · Hold title to drag'],
         ['长按拖动', 'Hold to drag'], ['图片 ZIP 下载', 'Image ZIP Download'], ['保存方式', 'Save Method'],
         ['无需 gallery-dl、Python、Bridge 或本地服务。脚本直接读取图片页、按所选画质下载图片并生成 ZIP；最终文件保存到浏览器当前下载目录。', 'No gallery-dl, Python, Bridge or local service required. The script reads image pages, downloads the selected image quality and creates a ZIP directly in the browser.'],
         ['压缩包名称', 'ZIP Name'], ['默认标题（英文/中文/罗马音）', 'Default title (English/Chinese/Romaji)'],
@@ -2243,10 +2242,9 @@
 
     var PANEL_HTML = `
 <div id="eh-toolbox-panel">
-  <div id="eh-toolbox-header" title="点击展开/收起">
+  <div id="eh-toolbox-header" title="长按拖动">
     <span class="eh-tb-icon">EH</span>
     <span class="eh-tb-title">EH Library Toolkit</span>
-    <span class="eh-tb-arrow">▼</span>
   </div>
   <div id="eh-toolbox-body">
 
@@ -2304,7 +2302,7 @@
       <button id="eh-tb-save" class="eh-tb-btn eh-tb-btn-primary">保存并刷新</button>
       <button id="eh-tb-reset" class="eh-tb-btn eh-tb-btn-secondary">恢复默认</button>
     </div>
-    <div class="eh-tb-footer">ExHentai Library Toolkit v1.0 | 鼠标离开3秒自动收起 · 长按标题拖动</div>
+    <div class="eh-tb-footer">ExHentai Library Toolkit v1.1.0 | 悬浮按钮开关面板 · 长按标题拖动</div>
   </div>
 </div>`;
 
@@ -2313,7 +2311,6 @@
   <div id="eh-gallerydl-header" title="长按拖动">
     <span class="eh-tb-icon">DL</span>
     <span class="eh-tb-title">图片 ZIP 下载</span>
-    <span class="eh-tb-arrow">▼</span>
   </div>
   <div id="eh-gallerydl-body">
     <div class="eh-tb-section">
@@ -2362,7 +2359,7 @@
       <button id="eh-gdl-save" class="eh-tb-btn eh-gdl-btn-save">保存下载设置</button>
     </div>
     <div class="eh-gdl-hint">仅获取元数据：按“压缩包名称”设置生成带 [仅元数据] 前缀的 ZIP，内含 metadata.json 和 info.json，不下载图片，保存到浏览器下载目录。</div>
-    <div class="eh-tb-footer">ExHentai Library Toolkit v1.0.2 · Pure Browser Downloader · LRR info.json</div>
+    <div class="eh-tb-footer">ExHentai Library Toolkit v1.1.0 · Pure Browser Downloader · LRR info.json</div>
   </div>
 </div>`
 
@@ -2392,13 +2389,11 @@
 }
 .eh-tb-title { flex: 1; }
 .eh-tb-arrow { transition: transform 0.25s; font-size: 10px; }
-#eh-toolbox-panel.collapsed .eh-tb-arrow, #eh-gallerydl-panel.collapsed .eh-tb-arrow { transform: rotate(-90deg); }
 
 #eh-toolbox-body, #eh-gallerydl-body {
   max-height: 600px; overflow-y: auto; padding: 12px;
   transition: max-height 0.3s ease;
 }
-#eh-toolbox-panel.collapsed #eh-toolbox-body, #eh-gallerydl-panel.collapsed #eh-gallerydl-body { max-height: 0; padding-top: 0; padding-bottom: 0; overflow: hidden; }
 
 #eh-toolbox-body::-webkit-scrollbar, #eh-gallerydl-body::-webkit-scrollbar { width: 6px; }
 #eh-toolbox-body::-webkit-scrollbar-thumb, #eh-gallerydl-body::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.15); border-radius: 3px; }
@@ -2704,14 +2699,12 @@
       if (typeof GM_registerMenuCommand !== 'function') return;
 
       GM_registerMenuCommand(t('⚙ 打开LRR设置', '⚙ Open LRR Settings'), function () {
-        var panel = document.querySelector('#eh-toolbox-panel');
-        if (panel) {
-          panel.classList.remove('collapsed');
-          panel.scrollIntoView({behavior:'smooth', block:'center'});
-        }
+        ensureFloatingUi();
+        toggleLrrFloatPanel(true);
       });
 
       GM_registerMenuCommand(t('⬇ 打开图片 ZIP 下载', '⬇ Open Image ZIP Download'), function () {
+        ensureFloatingUi();
         toggleGalleryDlPanel(true);
       });
 
@@ -2747,6 +2740,7 @@
       }
 
       if (show) {
+        toggleGalleryDlPanel(false);
         panel.style.display = 'block';
         panel.classList.remove('collapsed');
       } else {
@@ -2785,6 +2779,7 @@
       if (show === undefined) show = panel.style.display === 'none';
       panel.style.display = show ? 'block' : 'none';
       if (show) {
+        toggleLrrFloatPanel(false);
         panel.classList.remove('collapsed');
         updateGalleryDlPreview(panel);
       }
@@ -2832,7 +2827,6 @@
       }
 
       var header = panel.querySelector('#eh-gallerydl-header');
-      header.addEventListener('click', function () { panel.classList.toggle('collapsed'); });
       makeDraggable(panel, header, 'ehGalleryDlPanelPos');
 
       panel.querySelector('#cfg-galleryDlOriginal').checked = CONFIG.galleryDlOriginal !== false;
@@ -2879,17 +2873,7 @@
       panelContainer.innerHTML = localizeHtml(PANEL_HTML);
       var panel = panelContainer.firstElementChild;
       
-      var floatPanelLeaveTimer = null;
-      panel.addEventListener('mouseenter', function () {
-        if (floatPanelLeaveTimer) clearTimeout(floatPanelLeaveTimer);
-      });
-      panel.addEventListener('mouseleave', function () {
-        floatPanelLeaveTimer = setTimeout(function () {
-          toggleLrrFloatPanel(false);
-        }, 1500);
-      });
-
-document.body.appendChild(panel);
+      document.body.appendChild(panel);
       panel.style.display = 'none';
 
       // 恢复位置
@@ -2900,32 +2884,9 @@ document.body.appendChild(panel);
         panel.style.left = savedPos.left + 'px';
       }
 
-      // 折叠状态
-      if (CONFIG.panelCollapsed) panel.classList.add('collapsed');
-
-      // 折叠/展开
+      // 面板始终展开；标题仅用于拖动，显隐由悬浮按钮控制。
       var header = panel.querySelector('#eh-toolbox-header');
-      header.addEventListener('click', function () {
-        panel.classList.toggle('collapsed');
-        gmSet('panelCollapsed', panel.classList.contains('collapsed'));
-      });
-
-      // 拖动
       makeDraggable(panel, header);
-
-      // 自动隐藏菜单
-      var hideTimer = null;
-      panel.addEventListener('mouseenter', function () {
-        if (hideTimer) clearTimeout(hideTimer);
-        panel.classList.remove('collapsed');
-      });
-      panel.addEventListener('mouseleave', function () {
-        hideTimer = setTimeout(function () {
-          if (!panel.classList.contains('collapsed')) {
-            panel.classList.add('collapsed');
-          }
-        }, 3000);
-      });
 
       // 填充当前配置
       normalizeLanguageOptions(panel);

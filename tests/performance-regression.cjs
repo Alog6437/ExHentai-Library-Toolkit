@@ -5,6 +5,33 @@ const vm = require('node:vm');
 const { test } = require('node:test');
 
 const source = fs.readFileSync(path.join(__dirname, '../ExHentai_Library_Toolkit.user.js'), 'utf8');
+test('floating buttons switch mutually exclusive panels and do not cancel downloads', () => {
+  const panels = {
+    '#eh-toolbox-panel': { style: { display: 'none' }, classList: { remove() {} } },
+    '#eh-gallerydl-panel': { style: { display: 'none' }, classList: { remove() {} } },
+  };
+  const ctx = load('    function toggleLrrFloatPanel(', '    function createLrrFloatBall(', {
+    document: { querySelector: selector => panels[selector] },
+    galleryDlBusy: true, updateGalleryDlPreview: () => {},
+  });
+  const start = source.indexOf('    function toggleGalleryDlPanel(');
+  vm.runInContext(source.slice(start, source.indexOf('    function createGalleryDlFloatBall(', start)), ctx);
+  const state = () => Object.values(panels).map(panel => panel.style.display);
+  ctx.toggleLrrFloatPanel();
+  assert.deepEqual(state(), ['block', 'none']);
+  ctx.toggleGalleryDlPanel();
+  assert.deepEqual(state(), ['none', 'block']);
+  ctx.toggleGalleryDlPanel();
+  assert.deepEqual(state(), ['none', 'none']);
+  ctx.toggleGalleryDlPanel(true);
+  ctx.toggleLrrFloatPanel(true);
+  ctx.toggleLrrFloatPanel(true);
+  assert.deepEqual(state(), ['block', 'none']);
+  ctx.toggleLrrFloatPanel();
+  assert.deepEqual(state(), ['none', 'none']);
+  assert.equal(ctx.galleryDlBusy, true);
+});
+
 test('unfinished downloads request native leave confirmation and remove it when settled', () => {
   const listeners = new Map();
   const ctx = load('    function warnBeforeLeavingDownload(', '    function galleryRawRequest(', {
