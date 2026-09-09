@@ -1,6 +1,6 @@
 # ExHentai Library Toolkit
 
-**Current version: 1.1.0**
+**Current version: 1.1.2**
 
 All-in-one userscript for ExHentai/E-Hentai: LANraragi duplicate checking, original image ZIP downloads with metadata, favorites, search, and UI enhancements.
 
@@ -127,6 +127,12 @@ LRR ≈
 ```
 
 Indicates that a possible match was found through fallback searching. Manual confirmation through the LANraragi search result is recommended.
+
+## Version 1.1.2 Changes
+
+- Retry cleanup of the current OPFS temporary ZIP after a failed or abnormally settled download.
+- Remove stale `.eh-pure-*.zip` files older than the safety window whenever a download task runs.
+- Keep successful temporary ZIPs only for the browser handoff grace period, avoiding premature deletion that could corrupt the final download.
 
 ## Version 1.1.0 Changes
 

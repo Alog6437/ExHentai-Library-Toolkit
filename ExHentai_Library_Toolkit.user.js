@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name        ExHentai Library Toolkit
 // @namespace   https://github.com/Alog6437/ExHentai-Library-Toolkit
-// @version     1.1.1
+// @version     1.1.2
 // @description  ExHentai/E-Hentai 一体化工具：LANraragi 查重、纯浏览器图片 ZIP 下载与元数据打包、快捷收藏、全局搜索、翻译高亮及统一悬浮面板。
 // @description:en  All-in-one ExHentai/E-Hentai toolkit with LANraragi duplicate checking, image ZIP downloads, metadata, favorites, search and translation highlighting.
 // @author      Alog6437
@@ -561,12 +561,49 @@
     };
     OpfsZipSink.prototype.write = function (bytes) { return this.writable.write(bytes); };
     OpfsZipSink.prototype.finish = async function () { await this.writable.close(); this.writable = null; return this.handle.getFile(); };
+    async function removeOpfsEntryWithRetry(root, name) {
+      for (var attempt = 0; attempt < 5; attempt++) {
+        try {
+          await root.removeEntry(name);
+          return true;
+        } catch (e) {
+          if (e && e.name === 'NotFoundError') return true;
+          if (attempt < 4) await sleepMs(100 * Math.pow(2, attempt));
+        }
+      }
+      return false;
+    }
+
+    async function cleanupGalleryDlTempFiles(maxAgeMs, exceptName) {
+      if (!navigator.storage || !navigator.storage.getDirectory) return 0;
+      var root;
+      try { root = await navigator.storage.getDirectory(); }
+      catch (e) { return 0; }
+      var removed = 0;
+      var now = Date.now();
+      try {
+        for await (var entry of root.entries()) {
+          var name = entry[0];
+          var handle = entry[1];
+          if (name === exceptName || handle.kind !== 'file' || !/^\.eh-pure-\d+-\d+\.zip$/.test(name)) continue;
+          if (maxAgeMs > 0) {
+            try {
+              var file = await handle.getFile();
+              if (now - file.lastModified < maxAgeMs) continue;
+            } catch (e2) {}
+          }
+          if (await removeOpfsEntryWithRetry(root, name)) removed++;
+        }
+      } catch (e3) {}
+      return removed;
+    }
+
     OpfsZipSink.prototype.abort = async function () {
       try { if (this.writable) await this.writable.abort(); } catch (e) {}
       this.writable = null;
-      try { await this.root.removeEntry(this.name); } catch (e2) {}
+      await this.cleanup();
     };
-    OpfsZipSink.prototype.cleanup = async function () { try { await this.root.removeEntry(this.name); } catch (e) {} };
+    OpfsZipSink.prototype.cleanup = function () { return removeOpfsEntryWithRetry(this.root, this.name); };
 
     async function createZipSink(tempName) {
       try { return await OpfsZipSink.create(tempName); }
@@ -820,6 +857,7 @@
       var zipName = selectedTitle + '.zip';
       var tempName = '.eh-pure-' + info.gid + '-' + Date.now() + '.zip';
       var zip = null;
+      var cleanupTimer = null;
       setGalleryDownloadBusy(true);
       updateGalleryDlPreview(panel);
       if (button) { button.disabled = true; button.textContent = t('下载中…', 'Downloading…'); }
@@ -835,6 +873,9 @@
         var imagePages = await collectImagePageUrls(info, totalPages, statusBox);
         if (imagePages.length !== totalPages) throw new Error(t('图片页数量不完整：', 'Incomplete image-page list: ') + imagePages.length + '/' + totalPages);
 
+        // A closed/crashed tab cannot run its delayed cleanup. Reclaim only old
+        // downloader files here so another tab's active download is left alone.
+        await cleanupGalleryDlTempFiles(60 * 60 * 1000, tempName);
         var sink = await createZipSink(tempName);
         zip = new StreamingZipWriter(sink);
         var actualWorkers = Math.max(1, Math.min(cfg.galleryDlParallel, imagePages.length));
@@ -916,11 +957,21 @@
         triggerZipDownload(blob, zipName);
         refreshMetrics('done');
         updateGalleryDlStatus(statusBox, 'online', t('下载完成', 'Download complete'), zipName + ' · ' + stats.done + t(' 页 · ', ' pages · ') + formatGalleryDlBytes(stats.savedBytes));
-        setTimeout(function () { if (zip) zip.cleanup(); }, 30 * 60 * 1000);
+        // Anchor downloads expose no completion event. Keep the OPFS-backed File
+        // readable while the browser copies it, then remove it after a safe grace period.
+        cleanupTimer = setTimeout(async function () {
+          if (zip) await zip.cleanup();
+          await cleanupGalleryDlTempFiles(60 * 60 * 1000);
+        }, 30 * 60 * 1000);
       } catch (e) {
         if (zip) { try { await zip.abort(); } catch (abortError) {} }
         updateGalleryDlStatus(statusBox, 'offline', t('下载失败', 'Download failed'), e.message);
       } finally {
+        // Failures are cleaned synchronously above. Also reclaim historical
+        // leftovers on every settled task; the successful current file is
+        // intentionally protected by cleanupTimer until the browser has copied it.
+        if (zip && !cleanupTimer) { try { await zip.cleanup(); } catch (cleanupError) {} }
+        await cleanupGalleryDlTempFiles(60 * 60 * 1000, cleanupTimer ? tempName : '');
         setGalleryDownloadBusy(false);
         if (button) { button.disabled = false; button.textContent = t('下载当前图库', 'Download Gallery'); }
         updateGalleryDlPreview(panel);
@@ -2331,7 +2382,7 @@
       <button id="eh-tb-save" class="eh-tb-btn eh-tb-btn-primary">保存并刷新</button>
       <button id="eh-tb-reset" class="eh-tb-btn eh-tb-btn-secondary">恢复默认</button>
     </div>
-    <div class="eh-tb-footer">ExHentai Library Toolkit v1.1.1 | 悬浮按钮开关面板 · 长按标题拖动</div>
+    <div class="eh-tb-footer">ExHentai Library Toolkit v1.1.2 | 悬浮按钮开关面板 · 长按标题拖动</div>
   </div>
 </div>`;
 
@@ -2388,7 +2439,7 @@
       <button id="eh-gdl-save" class="eh-tb-btn eh-gdl-btn-save">保存下载设置</button>
     </div>
     <div class="eh-gdl-hint">仅获取元数据：按“压缩包名称”设置生成带 [仅元数据] 前缀的 ZIP，内含 metadata.json 和 info.json，不下载图片，保存到浏览器下载目录。</div>
-    <div class="eh-tb-footer">ExHentai Library Toolkit v1.1.1 · Pure Browser Downloader · LRR info.json</div>
+    <div class="eh-tb-footer">ExHentai Library Toolkit v1.1.2 · Pure Browser Downloader · LRR info.json</div>
   </div>
 </div>`
 

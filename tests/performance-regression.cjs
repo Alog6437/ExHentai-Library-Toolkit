@@ -164,6 +164,37 @@ test('download rendering is throttled while final states and latest counters are
   assert.equal(updates.at(-1).status, 'done');
 });
 
+test('OPFS cleanup retries locked entries and removes only stale downloader ZIPs', async () => {
+  const now = Date.now();
+  const files = new Map([
+    ['.eh-pure-1-100.zip', { kind: 'file', lastModified: now - 7200000 }],
+    ['.eh-pure-2-200.zip', { kind: 'file', lastModified: now - 7200000 }],
+    ['.eh-pure-3-300.zip', { kind: 'file', lastModified: now - 1000 }],
+    ['keep.zip', { kind: 'file', lastModified: now - 7200000 }],
+  ]);
+  const attempts = new Map();
+  const root = {
+    entries: async function* () {
+      for (const [name, file] of Array.from(files)) {
+        yield [name, { kind: file.kind, getFile: async () => ({ lastModified: file.lastModified }) }];
+      }
+    },
+    removeEntry: async name => {
+      attempts.set(name, (attempts.get(name) || 0) + 1);
+      if (name === '.eh-pure-1-100.zip' && attempts.get(name) === 1) throw Object.assign(new Error('locked'), { name: 'NoModificationAllowedError' });
+      if (!files.delete(name)) throw Object.assign(new Error('missing'), { name: 'NotFoundError' });
+    },
+  };
+  const ctx = load('    function OpfsZipSink(', '    async function createZipSink(', {
+    navigator: { storage: { getDirectory: async () => root } },
+    sleepMs: async () => {},
+  });
+  const removed = await ctx.cleanupGalleryDlTempFiles(3600000, '.eh-pure-2-200.zip');
+  assert.equal(removed, 1);
+  assert.equal(attempts.get('.eh-pure-1-100.zip'), 2);
+  assert.deepEqual(Array.from(files.keys()), ['.eh-pure-2-200.zip', '.eh-pure-3-300.zip', 'keep.zip']);
+});
+
 test('uncensored batches preserve matching, cache reuse, redraw and failure recovery', async () => {
   const requests = [], rendered = [];
   let entries = Array.from({ length: 26 }, (_, i) => ({ key: `${i + 1}/a`, galleryUrl: `${i + 1}/a`, titleElement: i + 1 }));
