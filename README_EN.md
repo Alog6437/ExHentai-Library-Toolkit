@@ -1,6 +1,6 @@
 # ExHentai Library Toolkit
 
-**Current version: 1.1.2**
+**Current version: 1.1.4**
 
 All-in-one userscript for ExHentai/E-Hentai: LANraragi duplicate checking, original image ZIP downloads with metadata, favorites, search, and UI enhancements.
 
@@ -29,7 +29,7 @@ It combines LANraragi duplicate checking, browser-based original image downloads
 - Save images using sequential numbering.
 - Automatically package downloaded files into a ZIP archive.
 - Optionally include metadata.json and LANraragi-compatible info.json.
-- Use the ZIP Name setting to choose the default or original/Japanese title; archives go to the browser download directory.
+- ZIP names use the original/Japanese title by default (falling back when unavailable), and can be switched to the English/Chinese/Romaji title; archives go to the browser download directory.
 - While downloading or packaging, refreshing, closing or leaving the page requests the browser's native confirmation. Cancel to keep the task running; leaving interrupts it. The browser controls the wording, and protection is removed when the task completes or fails.
 
 ### Metadata-Only ZIP Downloads
@@ -112,6 +112,8 @@ YOUR_API_KEY
 
 Use the URL that matches your own LANraragi deployment.
 
+The **Rescan archive folder** button in the toolbox calls LANraragi's Shinobu rescan endpoint. It clears the file scan map, restarts the file watcher, and scans the archive directory configured in LANraragi. An API key is required, and scanning continues on the LANraragi server in the background.
+
 > Never expose your LANraragi API key, cookies, or other private credentials in public repositories, issues, screenshots, or other public content.
 
 ## LANraragi Match Status
@@ -127,6 +129,18 @@ LRR ≈
 ```
 
 Indicates that a possible match was found through fallback searching. Manual confirmation through the LANraragi search result is recommended.
+
+## Version 1.1.4 Changes
+
+- Added a **Rescan archive folder** button and userscript menu command to trigger a full LANraragi Shinobu rescan from an E-Hentai/ExHentai page.
+- Added an explicit confirmation before the operation and panel feedback for success or API errors.
+
+## Version 1.1.3 Changes
+
+- Added per-image recovery: ordinary failures retry quickly, then enter a recovery queue that refreshes image pages and switches sources instead of immediately stopping other workers.
+- Added retry backoff for gallery pages plus `nl` source switching, `Referer`/`X-Alt-Referer`, no-cache original requests, and a 300-second image timeout.
+- Detect image quota/GP exhaustion, temporary IP bans, suspended accounts, and HTML error responses; site-wide failures stop immediately instead of wasting retries.
+- Use the original/Japanese title as the default ZIP name, falling back to the default title when unavailable.
 
 ## Version 1.1.2 Changes
 
@@ -147,7 +161,7 @@ With Node.js installed, run:
 
 ```sh
 node --check ExHentai_Library_Toolkit.user.js
-node --test tests/performance-regression.cjs
+node --test tests/*.cjs
 ```
 
 Regression tests cover leave-page protection, DOM observation, caching and progress rendering. Native browser prompts and real-site interactions still require browser testing.

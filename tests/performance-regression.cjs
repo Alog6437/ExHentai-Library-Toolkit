@@ -164,6 +164,43 @@ test('download rendering is throttled while final states and latest counters are
   assert.equal(updates.at(-1).status, 'done');
 });
 
+test('gallery retries recover transient failures but stop immediately for site-wide failures', async () => {
+  const ctx = load('    function sleepMs(', '    function sanitizeGalleryTitle(', {
+    setTimeout: fn => { fn(); return 1; },
+    t: (zh, en) => en,
+  });
+  let attempts = 0;
+  const value = await ctx.retryGalleryOperation(async () => {
+    attempts++;
+    if (attempts < 3) throw new Error('temporary');
+    return 'ok';
+  }, 3, 0);
+  assert.equal(value, 'ok');
+  assert.equal(attempts, 3);
+
+  attempts = 0;
+  await assert.rejects(ctx.retryGalleryOperation(async () => {
+    attempts++;
+    throw Object.assign(new Error('quota'), { galleryFatal: true });
+  }, 3, 0), /quota/);
+  assert.equal(attempts, 1);
+});
+
+test('image-page recovery extracts and reapplies the E-Hentai nl source token', () => {
+  const ctx = load('    function addGalleryQuery(', '    function imageExtension(', {
+    window: { location: { href: 'https://exhentai.org/g/1/token/' } },
+    URL, t: (zh, en) => en,
+  });
+  assert.equal(ctx.parseGalleryNlToken("<script>return nl('fresh-node')</script>"), 'fresh-node');
+  assert.equal(ctx.parseGalleryNlToken('<html></html>'), '');
+  assert.equal(ctx.addGalleryQuery('https://exhentai.org/s/key/1-1', 'nl', 'fresh-node'), 'https://exhentai.org/s/key/1-1?nl=fresh-node');
+});
+
+test('new installs default ZIP names to the original Japanese title', () => {
+  assert.match(source, /galleryDlTitleMode:\s*'japanese'/);
+  assert.match(source, /GALLERY_DL_RECOVERY_ROUNDS\s*=\s*3/);
+});
+
 test('OPFS cleanup retries locked entries and removes only stale downloader ZIPs', async () => {
   const now = Date.now();
   const files = new Map([

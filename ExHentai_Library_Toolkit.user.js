@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name        ExHentai Library Toolkit
 // @namespace   https://github.com/Alog6437/ExHentai-Library-Toolkit
-// @version     1.1.2
+// @version     1.1.4
 // @description  ExHentai/E-Hentai 一体化工具：LANraragi 查重、纯浏览器图片 ZIP 下载与元数据打包、快捷收藏、全局搜索、翻译高亮及统一悬浮面板。
 // @description:en  All-in-one ExHentai/E-Hentai toolkit with LANraragi duplicate checking, image ZIP downloads, metadata, favorites, search and translation highlighting.
 // @author      Alog6437
@@ -34,7 +34,7 @@
     uiLanguage: 'zh', // zh=中文，en=English
 
     // --- 纯浏览器图片下载 ---
-    galleryDlTitleMode: 'default', // default=默认标题（英文/中文/罗马音），japanese=原文/日文标题
+    galleryDlTitleMode: 'japanese', // default=默认标题（英文/中文/罗马音），japanese=原文/日文标题
     galleryDlOriginal: true, // true=原画，false=页面显示的压缩/缩放图
     galleryDlWriteMetadata: true,
     galleryDlParallel: 2, // 任意正整数；实际工作线程不超过图库页数
@@ -115,6 +115,7 @@
         ['控制台日志', 'Console logging'], ['LRR Debug 模式', 'LRR Debug mode'],
         ['LRR：等待检测', 'LRR: Waiting for check'], ['将自动检测服务器状态', 'Server status will be checked automatically'],
         ['重新扫描当前页', 'Rescan current page'], ['测试LRR连接', 'Test LRR connection'],
+        ['重新扫描档案文件夹', 'Rescan archive folder'],
         ['清空全部LRR缓存', 'Clear all LRR cache'], ['保存并刷新', 'Save & Reload'], ['恢复默认', 'Restore Defaults'],
         ['悬浮按钮开关面板 · 长按标题拖动', 'Auto-collapse after 3s · Hold title to drag'],
         ['长按拖动', 'Hold to drag'], ['图片 ZIP 下载', 'Image ZIP Download'], ['保存方式', 'Save Method'],
@@ -229,6 +230,8 @@
     var galleryDlBusy = false;
     var CRC32_TABLE = null;
     var ZIP32_MAX = 0xffffffff;
+    var GALLERY_DL_FAST_RETRIES = 3;
+    var GALLERY_DL_RECOVERY_ROUNDS = 3;
 
     function warnBeforeLeavingDownload(event) {
       if (!galleryDlBusy) return;
@@ -256,7 +259,12 @@
           onprogress: options.onprogress,
           onload: function (res) {
             if (res.status >= 200 && res.status < 400) resolve(res);
-            else reject(new Error('HTTP ' + res.status + '：' + (res.statusText || options.url)));
+            else {
+              var error = new Error('HTTP ' + res.status + '：' + (res.statusText || options.url));
+              error.status = res.status;
+              error.response = res;
+              reject(error);
+            }
           },
           onerror: function () { reject(new Error('网络请求失败：' + options.url)); },
           ontimeout: function () { reject(new Error('请求超时：' + options.url)); },
@@ -278,18 +286,54 @@
       });
     }
 
+    function createGallerySiteError(code, zh, en) {
+      var error = new Error(t(zh, en));
+      error.galleryCode = code;
+      error.galleryFatal = true;
+      return error;
+    }
+
+    function decodeGalleryErrorBody(data) {
+      if (!(data instanceof ArrayBuffer) || data.byteLength > 128 * 1024 || typeof TextDecoder === 'undefined') return '';
+      try { return new TextDecoder().decode(new Uint8Array(data)); }
+      catch (e) { return ''; }
+    }
+
+    function detectGallerySiteError(data, contentType) {
+      var body = decodeGalleryErrorBody(data);
+      if (!body && contentType.indexOf('text/') !== 0) return null;
+      if (/temporarily banned/i.test(body)) return createGallerySiteError('ip-banned', 'IP 已被 E-Hentai 临时封禁，请降低并发并等待解封', 'Your IP has been temporarily banned by E-Hentai; reduce concurrency and wait for the ban to expire');
+      if (/account has been suspended/i.test(body)) return createGallerySiteError('account-suspended', 'E-Hentai 账号已被冻结，无法继续下载原画', 'The E-Hentai account is suspended and original-image downloading cannot continue');
+      if (/exceeded your image viewing limits|do not have sufficient GP|requires GP, and you do not have enough|reached the image limit/i.test(body)) {
+        return createGallerySiteError('quota-exceeded', '图片额度或 GP 不足，下载已暂停', 'Image quota or GP is insufficient; downloading has stopped');
+      }
+      if (contentType.indexOf('text/') === 0 || /^\s*(?:<!doctype|<html|an error has occurred)/i.test(body)) {
+        var error = new Error(t('图片服务器返回了错误页面', 'The image server returned an error page'));
+        error.galleryCode = 'image-error-page';
+        return error;
+      }
+      return null;
+    }
+
     function galleryBinaryRequest(url, referer, onprogress) {
       var headers = {};
-      if (referer) headers.Referer = referer;
+      if (referer) {
+        headers.Referer = referer;
+        headers['X-Alt-Referer'] = referer;
+      }
+      if (/\/fullimg(?:\.php|\/)/i.test(url)) headers['Cache-Control'] = 'no-cache';
       return galleryRawRequest({
-        method: 'GET', url: url, headers: headers, responseType: 'arraybuffer', timeout: 180000, onprogress: onprogress,
+        method: 'GET', url: url, headers: headers, responseType: 'arraybuffer', timeout: 300000, onprogress: onprogress,
       }).then(function (res) {
         var data = res.response;
         if (!(data instanceof ArrayBuffer)) throw new Error(t('图片响应不是二进制数据', 'Image response is not binary data'));
         var headersText = String(res.responseHeaders || '');
         var typeMatch = headersText.match(/(?:^|\r?\n)content-type:\s*([^;\r\n]+)/i);
         var contentType = typeMatch ? typeMatch[1].trim().toLowerCase() : '';
-        if (contentType && contentType.indexOf('image/') !== 0 && contentType !== 'application/octet-stream') {
+        var siteError = detectGallerySiteError(data, contentType);
+        if (siteError) throw siteError;
+        var toleratedImageTypes = ['image', 'jpg', 'jpeg', 'png', 'gif', 'webp', 'bmp', 'tif', 'tiff', 'apng'];
+        if (contentType && contentType.indexOf('image/') !== 0 && contentType !== 'application/octet-stream' && toleratedImageTypes.indexOf(contentType) < 0) {
           throw new Error(t('图片请求返回了非图片内容：', 'Image request returned non-image content: ') + contentType);
         }
         if (!data.byteLength) throw new Error(t('图片响应为空', 'Image response is empty'));
@@ -298,6 +342,24 @@
     }
 
     function sleepMs(ms) { return new Promise(function (resolve) { setTimeout(resolve, ms); }); }
+
+    function galleryRetryDelay(attempt, recoveryRound) {
+      var base = recoveryRound ? 1200 * Math.pow(2, recoveryRound - 1) : 350 * attempt;
+      return base + Math.floor(Math.random() * 250);
+    }
+
+    async function retryGalleryOperation(operation, attempts, recoveryRound) {
+      var lastError = null;
+      for (var attempt = 1; attempt <= attempts; attempt++) {
+        try { return await operation(attempt); }
+        catch (e) {
+          lastError = e;
+          if (e && e.galleryFatal) throw e;
+          if (attempt < attempts) await sleepMs(galleryRetryDelay(attempt, recoveryRound || 0));
+        }
+      }
+      throw lastError || new Error(t('未知下载错误', 'Unknown download error'));
+    }
 
 
     function sanitizeGalleryTitle(title) {
@@ -410,7 +472,7 @@
     function readGalleryDlPanelConfig(panel) {
       var modeNode = panel.querySelector('input[name="cfg-galleryDlTitleMode"]:checked');
       return {
-        galleryDlTitleMode: modeNode ? modeNode.value : 'default',
+        galleryDlTitleMode: modeNode ? modeNode.value : 'japanese',
         galleryDlOriginal: panel.querySelector('#cfg-galleryDlOriginal').checked,
         galleryDlWriteMetadata: panel.querySelector('#cfg-galleryDlWriteMetadata').checked,
         galleryDlParallel: Math.max(1, parseInt(panel.querySelector('#cfg-galleryDlParallel').value, 10) || 1),
@@ -458,7 +520,9 @@
       while (page < maxPages && (!totalPages || collected.size < totalPages)) {
         var url = info.url + (page ? ('?p=' + page) : '');
         updateGalleryDlStatus(statusBox, 'checking', t('正在读取图库页', 'Reading gallery pages'), t('缩略图页 ', 'Thumbnail page ') + (page + 1) + t(' · 已找到 ', ' · Found ') + collected.size + '/' + (totalPages || '?'));
-        var res = await galleryTextRequest(url, 'GET', null, null, 45000);
+        var res = await retryGalleryOperation(function () {
+          return galleryTextRequest(url, 'GET', null, null, 45000);
+        }, GALLERY_DL_FAST_RETRIES, 0);
         var found = parseImagePageLinks(res.text, url, info.gid);
         var before = collected.size;
         found.forEach(function (value, key) { collected.set(key, value); });
@@ -472,23 +536,40 @@
       return totalPages ? urls.slice(0, totalPages) : urls;
     }
 
-    async function resolveDownloadImageUrl(pageUrl, useOriginal) {
-      var res = await galleryTextRequest(pageUrl, 'GET', null, null, 60000);
+    function addGalleryQuery(url, name, value) {
+      if (!value) return url;
+      var parsed = new URL(url, window.location.href);
+      parsed.searchParams.set(name, value);
+      return parsed.href;
+    }
+
+    function parseGalleryNlToken(html) {
+      var match = String(html || '').match(/return\s+nl\(['"]([\w-]+)['"]\)/i);
+      return match ? match[1] : '';
+    }
+
+    async function resolveDownloadImageUrl(pageUrl, useOriginal, nlToken) {
+      var requestedPageUrl = addGalleryQuery(pageUrl, 'nl', nlToken);
+      var res = await galleryTextRequest(requestedPageUrl, 'GET', null, null, 60000);
       var doc = new DOMParser().parseFromString(res.text, 'text/html');
       var img = doc.querySelector('#img');
       var src = img && img.getAttribute('src');
+      var nextNl = parseGalleryNlToken(res.text);
 
       // Unchecked = use the image currently displayed on the image page (resized/compressed).
       if (!useOriginal) {
-        if (src) return new URL(src, pageUrl).href;
+        if (src) return { url: new URL(src, requestedPageUrl).href, nlToken: nextNl, pageUrl: requestedPageUrl };
         throw new Error(t('图片页没有可下载的压缩/缩放图', 'No compressed/resized image was found on the image page'));
       }
 
       var original = doc.querySelector('a[href*="/fullimg.php"], a[href*="/fullimg/"]');
-      if (original && original.getAttribute('href')) return new URL(original.getAttribute('href'), pageUrl).href;
+      if (original && original.getAttribute('href')) {
+        var originalUrl = new URL(original.getAttribute('href'), requestedPageUrl).href;
+        return { url: addGalleryQuery(originalUrl, 'nl', nextNl), nlToken: nextNl, pageUrl: requestedPageUrl };
+      }
       if (src) {
-        var absolute = new URL(src, pageUrl).href;
-        if (/xres=org(?:[;&/]|$)/i.test(absolute)) return absolute;
+        var absolute = new URL(src, requestedPageUrl).href;
+        if (/xres=org(?:[;&/]|$)/i.test(absolute)) return { url: absolute, nlToken: nextNl, pageUrl: requestedPageUrl };
       }
       throw new Error(t('图片页没有可确认的原画链接', 'No confirmed original-image URL was found on the image page'));
     }
@@ -880,8 +961,11 @@
         zip = new StreamingZipWriter(sink);
         var actualWorkers = Math.max(1, Math.min(cfg.galleryDlParallel, imagePages.length));
         var stats = { started: Date.now(), networkBytes: 0, savedBytes: 0, done: 0, total: totalPages, workers: actualWorkers };
-        var nextIndex = 0;
-        var failed = null;
+        var downloadStates = imagePages.map(function () { return { nlToken: '', lastError: null }; });
+        var currentQueue = imagePages.map(function (_, index) { return index; });
+        var queueCursor = 0;
+        var roundFailures = [];
+        var fatalError = null;
         var writeChain = Promise.resolve();
 
         var lastMetricsUpdate = 0;
@@ -898,53 +982,74 @@
           }, true);
         }
 
-        async function worker(workerId) {
-          while (!failed) {
-            var index = nextIndex++;
-            if (index >= imagePages.length) return;
+        async function worker(workerId, recoveryRound) {
+          while (!fatalError) {
+            var queueIndex = queueCursor++;
+            if (queueIndex >= currentQueue.length) return;
+            var index = currentQueue[queueIndex];
             var pageNo = index + 1;
             try {
-              var bin = null;
-              var lastError = null;
-              for (var attempt = 1; attempt <= 3; attempt++) {
-                try {
-                  updateGalleryDlStatus(statusBox, 'checking', cfg.galleryDlOriginal ? t('正在下载原画', 'Downloading originals') : t('正在下载压缩图', 'Downloading compressed/resized images'), t('第 ', 'Page ') + pageNo + '/' + totalPages + t(' 页 · 线程 ', ' · Worker ') + workerId + (attempt > 1 ? (t(' · 重试 ', ' · Retry ') + attempt + '/3') : ''));
-                  var imageUrl = await resolveDownloadImageUrl(imagePages[index], cfg.galleryDlOriginal);
+              var bin = await retryGalleryOperation(async function (attempt) {
+                  var retryLabel = attempt > 1 || recoveryRound > 0
+                    ? t(' · 恢复轮次 ', ' · Recovery ') + (recoveryRound + 1) + '/' + GALLERY_DL_RECOVERY_ROUNDS + t(' · 尝试 ', ' · Attempt ') + attempt + '/' + GALLERY_DL_FAST_RETRIES
+                    : '';
+                  updateGalleryDlStatus(statusBox, 'checking', cfg.galleryDlOriginal ? t('正在下载原画', 'Downloading originals') : t('正在下载压缩图', 'Downloading compressed/resized images'), t('第 ', 'Page ') + pageNo + '/' + totalPages + t(' 页 · 线程 ', ' · Worker ') + workerId + retryLabel);
+                  var resolved = await resolveDownloadImageUrl(imagePages[index], cfg.galleryDlOriginal, downloadStates[index].nlToken);
+                  if (resolved.nlToken) downloadStates[index].nlToken = resolved.nlToken;
                   var lastLoaded = 0;
-                  bin = await galleryBinaryRequest(imageUrl, imagePages[index], function (evt) {
+                  var result = await galleryBinaryRequest(resolved.url, resolved.pageUrl || imagePages[index], function (evt) {
                     var loaded = Number(evt.loaded || 0);
                     if (loaded > lastLoaded) { stats.networkBytes += loaded - lastLoaded; lastLoaded = loaded; refreshMetrics('downloading'); }
                   });
-                  if (!lastLoaded) stats.networkBytes += bin.data.byteLength;
-                  break;
-                } catch (attemptError) {
-                  lastError = attemptError;
-                  if (attempt < 3) await sleepMs(300 * attempt);
-                }
-              }
-              if (!bin) throw lastError || new Error(t('未知下载错误', 'Unknown download error'));
+                  if (!lastLoaded) stats.networkBytes += result.data.byteLength;
+                  return result;
+                }, GALLERY_DL_FAST_RETRIES, recoveryRound);
               var ext = imageExtension(bin.finalUrl, bin.contentType, bin.headers);
               var digits = Math.max(3, String(totalPages).length);
               var filename = String(pageNo).padStart(digits, '0') + ext;
+              var savedBin = bin;
               writeChain = writeChain.then(async function () {
-                await zip.add(filename, bin.data);
-                stats.savedBytes += bin.data.byteLength;
+                await zip.add(filename, savedBin.data);
+                stats.savedBytes += savedBin.data.byteLength;
                 stats.done++;
                 refreshMetrics('downloading');
               });
               await writeChain;
             } catch (e) {
-              failed = new Error(t('第 ', 'Page ') + pageNo + t(' 页失败：', ' failed: ') + e.message);
-              return;
+              downloadStates[index].lastError = e;
+              if (e && e.galleryFatal) {
+                fatalError = new Error(t('第 ', 'Page ') + pageNo + t(' 页：', ': ') + e.message);
+                fatalError.galleryCode = e.galleryCode;
+                return;
+              }
+              roundFailures.push(index);
             }
           }
         }
 
-        var workers = [];
-        for (var w = 0; w < actualWorkers; w++) workers.push(worker(w + 1));
-        await Promise.all(workers);
-        await writeChain;
-        if (failed) throw failed;
+        for (var recoveryRound = 0; recoveryRound < GALLERY_DL_RECOVERY_ROUNDS && currentQueue.length; recoveryRound++) {
+          queueCursor = 0;
+          roundFailures = [];
+          var workers = [];
+          for (var w = 0; w < Math.min(actualWorkers, currentQueue.length); w++) workers.push(worker(w + 1, recoveryRound));
+          await Promise.all(workers);
+          await writeChain;
+          if (fatalError) throw fatalError;
+          if (!roundFailures.length) {
+            currentQueue = [];
+            break;
+          }
+          currentQueue = roundFailures.slice();
+          if (recoveryRound < GALLERY_DL_RECOVERY_ROUNDS - 1) {
+            updateGalleryDlStatus(statusBox, 'checking', t('正在恢复失败图片', 'Recovering failed images'), t('剩余 ', 'Remaining ') + currentQueue.length + t(' 页 · 刷新图片地址并换源', ' pages · refreshing image URLs and switching sources'));
+            await sleepMs(galleryRetryDelay(1, recoveryRound + 1));
+          }
+        }
+        if (currentQueue.length) {
+          var failedPages = currentQueue.map(function (index) { return index + 1; });
+          var firstFailure = downloadStates[currentQueue[0]].lastError;
+          throw new Error(t('以下页面重试后仍然失败：', 'These pages still failed after retries: ') + failedPages.join(', ') + (firstFailure ? ' · ' + firstFailure.message : ''));
+        }
 
         var metadata = buildMetadata(info, apiMeta, selectedTitle, stats.done, cfg.galleryDlOriginal);
         if (cfg.galleryDlWriteMetadata) {
@@ -1222,6 +1327,42 @@
       }
     }
 
+    async function triggerLrrContentRescan(statusBox, button) {
+      if (button) {
+        button.disabled = true;
+        button.textContent = t('正在触发重扫...', 'Starting rescan...');
+      }
+      updateLrrStatus(
+        statusBox,
+        'checking',
+        t('LRR：正在触发档案目录重扫…', 'LRR: Starting archive-folder rescan…'),
+        CONFIG.lrrServerUrl + '/api/shinobu/rescan'
+      );
+      try {
+        var result = await requestLrrContentRescan();
+        var pidDetail = result.new_pid
+          ? t('Shinobu 已重启，新进程 PID：', 'Shinobu restarted; new process PID: ') + result.new_pid
+          : t('Shinobu 已重启，服务器将在后台重新扫描', 'Shinobu restarted; the server will rescan in the background');
+        updateLrrStatus(
+          statusBox,
+          'online',
+          t('LRR：已触发档案目录重扫', 'LRR: Archive-folder rescan started'),
+          pidDetail
+        );
+        return result;
+      } catch (e) {
+        var reason = e && e.message ? e.message : String(e);
+        updateLrrStatus(statusBox, 'offline', t('LRR：触发重扫失败', 'LRR: Failed to start rescan'), reason);
+        console.error('[LRR Checker] Content-folder rescan failed:', e);
+        return null;
+      } finally {
+        if (button) {
+          button.disabled = false;
+          button.textContent = t('重新扫描档案文件夹', 'Rescan archive folder');
+        }
+      }
+    }
+
     function cleanupExpiredCache() {
       var lastCleanup = localStorage.getItem('lrr-cache-last-cleanup');
       var currentTime = Date.now();
@@ -1427,6 +1568,31 @@
       // LANraragi 要求 Bearer 后放置 base64(api_key)。兼容非 ASCII Key。
       try { return 'Bearer ' + btoa(unescape(encodeURIComponent(apiKey))); }
       catch (_) { return 'Bearer ' + btoa(apiKey); }
+    }
+
+    async function requestLrrContentRescan() {
+      if (!CONFIG.lrrServerUrl)
+        throw new Error(t('请先配置 LANraragi 服务器地址', 'Configure the LANraragi server address first'));
+      if (!CONFIG.lrrApiKey)
+        throw new Error(t('重新扫描档案文件夹需要 API Key', 'Rescanning the archive folder requires an API key'));
+
+      var response = await makeRequest({
+        method: 'POST',
+        url: CONFIG.lrrServerUrl + '/api/shinobu/rescan',
+        headers: { 'Authorization': getAuthorizationHeaderValue(CONFIG.lrrApiKey) }
+      });
+      var body = (response.responseText || '').trim();
+      if (!body) throw new Error(t('LRR 重扫接口返回为空', 'The LRR rescan endpoint returned an empty response'));
+
+      var result;
+      try { result = JSON.parse(body); }
+      catch (_) { throw new Error(t('LRR 重扫接口返回了无效 JSON', 'The LRR rescan endpoint returned invalid JSON')); }
+      if (!result || (result.success !== 1 && result.success !== '1')) {
+        throw new Error(result && (result.error || result.successMessage)
+          ? String(result.error || result.successMessage)
+          : t('LANraragi 未确认重扫成功', 'LANraragi did not confirm a successful rescan'));
+      }
+      return result;
     }
 
     function extractUrlfinderHit(result) {
@@ -2376,13 +2542,16 @@
       <button id="eh-tb-test-lrr" class="eh-tb-btn eh-tb-btn-secondary">测试LRR连接</button>
     </div>
     <div class="eh-tb-actions">
+      <button id="eh-tb-rescan-folder" class="eh-tb-btn eh-tb-btn-secondary">重新扫描档案文件夹</button>
+    </div>
+    <div class="eh-tb-actions">
       <button id="eh-tb-clear-lrr" class="eh-tb-btn eh-tb-btn-warning">清空全部LRR缓存</button>
     </div>
     <div class="eh-tb-actions">
       <button id="eh-tb-save" class="eh-tb-btn eh-tb-btn-primary">保存并刷新</button>
       <button id="eh-tb-reset" class="eh-tb-btn eh-tb-btn-secondary">恢复默认</button>
     </div>
-    <div class="eh-tb-footer">ExHentai Library Toolkit v1.1.2 | 悬浮按钮开关面板 · 长按标题拖动</div>
+    <div class="eh-tb-footer">ExHentai Library Toolkit v1.1.4 | 悬浮按钮开关面板 · 长按标题拖动</div>
   </div>
 </div>`;
 
@@ -2439,7 +2608,7 @@
       <button id="eh-gdl-save" class="eh-tb-btn eh-gdl-btn-save">保存下载设置</button>
     </div>
     <div class="eh-gdl-hint">仅获取元数据：按“压缩包名称”设置生成带 [仅元数据] 前缀的 ZIP，内含 metadata.json 和 info.json，不下载图片，保存到浏览器下载目录。</div>
-    <div class="eh-tb-footer">ExHentai Library Toolkit v1.1.2 · Pure Browser Downloader · LRR info.json</div>
+    <div class="eh-tb-footer">ExHentai Library Toolkit v1.1.4 · Pure Browser Downloader · LRR info.json</div>
   </div>
 </div>`
 
@@ -2792,6 +2961,18 @@
         if (typeof rescanCurrentPage === 'function') scheduleLrrRescan();
       });
 
+      GM_registerMenuCommand(t('📂 重新扫描LRR档案文件夹', '📂 Rescan LRR Archive Folder'), function () {
+        if (!confirm(t(
+          '确定让 LANraragi 清空文件扫描记录、重启 Shinobu 并重新扫描已配置的档案文件夹？',
+          'Clear LANraragi\'s file scan map, restart Shinobu, and rescan the configured archive folder?'
+        ))) return;
+        ensureFloatingUi();
+        toggleLrrFloatPanel(true);
+        var box = document.querySelector('#eh-tb-lrr-status');
+        var btn = document.querySelector('#eh-tb-rescan-folder');
+        triggerLrrContentRescan(box, btn);
+      });
+
       GM_registerMenuCommand(t('🧹 清理LRR缓存', '🧹 Clear LRR Cache'), function () {
         if (typeof clearLrrCache === 'function') {
           var count = clearLrrCache(false);
@@ -3033,6 +3214,7 @@
       var statusBox = panel.querySelector('#eh-tb-lrr-status');
       var testBtn = panel.querySelector('#eh-tb-test-lrr');
       var rescanBtn = panel.querySelector('#eh-tb-rescan-lrr');
+      var rescanFolderBtn = panel.querySelector('#eh-tb-rescan-folder');
       var clearBtn = panel.querySelector('#eh-tb-clear-lrr');
 
       if (testBtn) {
@@ -3047,6 +3229,16 @@
           rescanCurrentPage(false);
           updateLrrStatus(statusBox, 'checking', 'LRR：正在重扫当前页', '已清除当前页缓存 ' + removed + ' 项');
           setTimeout(function () { testLrrConnection(statusBox, testBtn); }, 500);
+        });
+      }
+
+      if (rescanFolderBtn) {
+        rescanFolderBtn.addEventListener('click', function () {
+          if (!confirm(t(
+            '确定让 LANraragi 清空文件扫描记录、重启 Shinobu 并重新扫描已配置的档案文件夹？',
+            'Clear LANraragi\'s file scan map, restart Shinobu, and rescan the configured archive folder?'
+          ))) return;
+          triggerLrrContentRescan(statusBox, rescanFolderBtn);
         });
       }
 
