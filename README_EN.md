@@ -1,6 +1,6 @@
 # ExHentai Library Toolkit
 
-**Current version: 1.1.4**
+**Current version: 1.1.5**
 
 All-in-one userscript for ExHentai/E-Hentai: LANraragi duplicate checking, original image ZIP downloads with metadata, favorites, search, and UI enhancements.
 
@@ -22,6 +22,29 @@ It combines LANraragi duplicate checking, browser-based original image downloads
 - Support exact matching and fallback searching.
 - Display match status directly on gallery lists.
 - Support rescanning and cache management.
+
+#### Duplicate recognition method (1.1.5)
+
+Checks proceed through cross-site URL matching, author/title search, and title-fragment search. Keep fallback title searching enabled to receive title matches and possible-match hints. Title searching also runs when URLFinder fails.
+
+| Badge | Meaning |
+| --- | --- |
+| Green `LRR ✔` | An archive with a matching source URL exists |
+| Blue/purple `LRR ≈` | A highly similar title exists; verify the edition |
+| Orange `LRR ?` | Possibly already in the library; manual confirmation needed |
+| Red `LRR !` | URL lookup failed; library status remains unknown |
+
+Hover for candidate titles and possible-match reasons; click to search LANraragi.
+
+1. **Normalize titles:** fold Unicode width, case and brackets; remove invisible characters, archive extensions, known event/language/translation/edition annotations. Read authors only from prefixes, preserving meaningful words and bracketed subtitles.
+2. **Verify authors:** match the circle and artist in `Circle (Artist)` separately. Use archive `artist:` and `group:` tags when the candidate title lacks an author. Explicit conflicting artists reject a candidate.
+3. **Check identity before similarity:** canonicalize forms such as `Vol. 02`/`第2巻` and `Chapter 12`/`第十二話`, including labeled Roman numerals. Reject conflicting numbers, volume/chapter types, story parts, extras and compilations.
+4. **Verify the work title:** combine bigram Dice and edit similarity. With author evidence, fuzzy matching requires at least 8 characters, edit similarity ≥ 0.88 and Dice ≥ 0.80. Without it, require at least 12 characters, ≥ 0.94 and ≥ 0.92. Short titles require normalized equality, with at least 6 characters when no author supports the match. A trailing source-work parenthesis may be omitted on one side; conflicting source works reject a candidate, and long shared source names cannot inflate title similarity.
+5. **Retrieve more candidates:** try at most 4 queries, including fragments of unspaced Chinese/Japanese titles, and read at most 3 result pages per query. Fragments retrieve candidates; complete work titles always decide matches. Pagination follows the [LANraragi Search API](https://sugoi.gitbook.io/lanraragi/api-documentation/search-api).
+6. **Keep caches fresh:** v8 title caches bypass negatives from older rules and are scoped by server. Concurrent identical queries share requests and raw candidates. Raw candidates, possible matches and negative results expire after 5 minutes; verified matches after 30 minutes. Manual rescans clear relevant raw queries as well. Pending indexes, empty/error responses and truncated results never create final negative caches; stale scans cannot overwrite a rescan.
+7. **Prefer a useful warning:** candidates below the `≈` threshold can produce an orange `?` using more permissive author and complete-title similarity checks. Require closer titles when author evidence is missing, and very close long titles when authors conflict. Similar works with different volumes or story parts may receive a hint explaining that difference, without being classified as verified duplicates. Confirmed same-page source URL hits also provide reliable title aliases for their library archives and immediately update other matching entries, even after an earlier empty search. An author alone or an unverified hint cannot propagate library evidence. Possible candidates never prevent an upgrade to `≈` or `✔`.
+
+Recognition uses URLs, titles and tags; it does not compare image contents or translate unrelated titles across languages. Entirely different translations without a confirmed alias, short titles without reliable author evidence, and archives beyond the first three result pages may still be missed. Both `≈` and `?` merit manual review; `?` warns of a possibility and does not confirm that a particular volume or edition is downloaded.
 
 ### Original Image ZIP Downloads
 
@@ -130,6 +153,21 @@ LRR ≈
 
 Indicates that a possible match was found through fallback searching. Manual confirmation through the LANraragi search result is recommended.
 
+## Version 1.1.5 Changes
+
+- Added orange `LRR ?` hints for possible existing archives, with candidate titles and reasons for uncertainty.
+- Reuse confirmed same-page source URL matches to recognize similar entries, including late-arriving matches and upgrades.
+- Separate failed URL lookups as red `LRR !` badges; upgrade title caches to v8.
+- Fixed quoted search terms preventing title retrieval. LANraragi interprets these as complete-title matches, preventing a work-name fragment from retrieving a decorated archive title. Use unquoted substring queries and verify complete titles locally.
+- Bypass incorrect negative results from the previous query format.
+- Added a user-reported title fixture with LANraragi search semantics, covering quoted exact matching, unquoted substring matching and search operators.
+
+- Improved title parsing, circle/artist aliases and author tags while preserving meaningful subtitles and tolerating limited typos.
+- Added volume, chapter and story-part identity checks to reduce false positives within a series.
+- Added unspaced Chinese/Japanese fragments, up to three candidate pages, and title fallback when URLFinder fails.
+- Versioned title caches, shared duplicate requests, and prevented incomplete searches from poisoning negative caches.
+- Added matching, pagination, response failure, cache and stale-request regression coverage.
+
 ## Version 1.1.4 Changes
 
 - Added a **Rescan archive folder** button and userscript menu command to trigger a full LANraragi Shinobu rescan from an E-Hentai/ExHentai page.
@@ -164,7 +202,7 @@ node --check ExHentai_Library_Toolkit.user.js
 node --test tests/*.cjs
 ```
 
-Regression tests cover leave-page protection, DOM observation, caching and progress rendering. Native browser prompts and real-site interactions still require browser testing.
+Regression tests cover title variants, author aliases/tags, volume/chapter conflicts, pagination, failed responses, caches and stale requests, plus leave-page protection, DOM observation and progress rendering. Native browser prompts and real LANraragi/site interactions still require browser testing.
 
 ## Credits & Origin
 

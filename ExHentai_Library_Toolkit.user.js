@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name        ExHentai Library Toolkit
 // @namespace   https://github.com/Alog6437/ExHentai-Library-Toolkit
-// @version     1.1.4
+// @version     1.1.5
 // @description  ExHentai/E-Hentai 一体化工具：LANraragi 查重、纯浏览器图片 ZIP 下载与元数据打包、快捷收藏、全局搜索、翻译高亮及统一悬浮面板。
 // @description:en  All-in-one ExHentai/E-Hentai toolkit with LANraragi duplicate checking, image ZIP downloads, metadata, favorites, search and translation highlighting.
 // @author      Alog6437
@@ -1095,6 +1095,7 @@
 
     var seenGalleryUrls = new Set();
     var altSearchInflight = new Map();
+    var knownLrrTitleAliases = new Map();
     var galleriesToCheck = [];
     var lrrScanGeneration = 0; // 每次手动重扫递增，旧请求结果自动作废
 
@@ -1125,7 +1126,9 @@
       if (cached) {
         try {
           var parsed = JSON.parse(cached);
-          if (parsed.timestamp && (Date.now() - parsed.timestamp) < CACHE_DURATION) return parsed.data;
+          var ttl = (parsed.data && (parsed.data.altHit === false || parsed.data.altKind === 'possible')) || /^lrr-checker-v\d+-raw-/.test(key)
+            ? LRR_NEGATIVE_CACHE_EXPIRE : CACHE_DURATION;
+          if (parsed.timestamp && (Date.now() - parsed.timestamp) < ttl) return parsed.data;
         } catch (e) { localStorage.removeItem(key); }
       }
       return null;
@@ -1151,6 +1154,7 @@
         if (typeof original === 'object' && original && typeof original.altHit === 'boolean') {
           var altOut = { altHit: original.altHit };
           if (original.altHits) altOut.altHits = original.altHits;
+          if (original.altKind) altOut.altKind = original.altKind;
           return altOut;
         }
         var out = {};
@@ -1240,8 +1244,11 @@
         var altKeys = [
           getAltCacheKeyFromTitle(entry.titleElement),
           'lrr-checker-v5-alt-strict-' + simpleHash(fullTitle + '|' + parts.author + ',' + parts.shortTitle),
-          'lrr-checker-v5-loose-' + simpleHash(fullTitle + '|' + parts.shortTitle)
-        ];
+          'lrr-checker-v5-loose-' + simpleHash(fullTitle + '|' + parts.shortTitle),
+          getTitleSearchCacheKey('alt-strict', fullTitle + '|' + parts.author + ',' + parts.shortTitle),
+          getTitleSearchCacheKey('loose', fullTitle + '|' + parts.shortTitle)
+        ].concat([parts.author + ',' + parts.shortTitle].concat(buildLooseSearchQueries(parts.shortTitle))
+          .map(function (query) { return getTitleSearchCacheKey('raw', query); }));
         altKeys.forEach(function (altKey) {
           if (altKey && localStorage.getItem(altKey) !== null) {
             localStorage.removeItem(altKey);
@@ -1260,6 +1267,7 @@
       document.querySelectorAll('.lrr-marker-span').forEach(function (el) { el.remove(); });
       seenGalleryUrls.clear();
       altSearchInflight.clear();
+      knownLrrTitleAliases.clear();
       galleriesToCheck.length = 0;
       runAltSearchLimited = createPool(CONFIG.altSearchConcurrency);
 
@@ -1398,9 +1406,10 @@
       return titleElement;
     }
 
-    function hasLrrMarker(titleElement) {
+    function hasLrrMarker(titleElement, confirmedOnly) {
       var scope = getLrrMarkerScope(titleElement);
-      return !!(scope && scope.querySelector('.lrr-marker-span'));
+      var marker = scope && scope.querySelector('.lrr-marker-span');
+      return !!marker && (!confirmedOnly || marker.classList.contains('lrr-marker-downloaded') || marker.classList.contains('lrr-marker-file'));
     }
 
     function formatLrrSize(bytes) {
@@ -1417,7 +1426,7 @@
       window.open(url, '_blank');
     }
 
-    // 创建查重标签；✔ 与 ≈ 均打开 LANraragi 搜索页，不打开阅读器，不显示悬浮卡。
+    // ✔=源链接命中，≈=高相似标题，?=疑似已有，!=请求失败。
     function prependLrrMarker(titleElement, text, classNames, matchType, hits, galleryUrl, searchQuery) {
       if (!titleElement || !titleElement.isConnected) return;
       hits = hits || [];
@@ -1430,7 +1439,15 @@
       markerSpan.classList.add('lrr-marker-span');
       (classNames || []).forEach(function (c) { markerSpan.classList.add(c); });
       markerSpan.textContent = text;
-      markerSpan.title = t('点击在 LANraragi 中搜索', 'Click to search in LANraragi');
+      markerSpan.dataset.lrrScore = String(hits[0] && hits[0].similarity || 0);
+      var explanation = matchType === 'possible'
+        ? t('库中可能已有，请核对候选作品', 'Possibly in your library; check the candidate')
+        : matchType === 'error' ? t('查重请求失败，尚未确认库内状态', 'Lookup failed; library status is unknown')
+        : matchType === 'urlfinder' ? t('库中已存在：源链接匹配', 'In your library: matching source URL')
+        : t('库中存在高度相似的标题，请核对版本', 'A highly similar title exists; check the edition');
+      if (hits[0] && hits[0].possibleReason) explanation += '\n' + getPossibleMatchReason(hits[0].possibleReason);
+      if (hits[0] && hits[0].title) explanation += '\n' + t('候选：', 'Candidate: ') + String(hits[0].title).slice(0, 240);
+      markerSpan.title = explanation + '\n' + t('点击在 LANraragi 中搜索', 'Click to search in LANraragi');
 
       var keyword = '';
       if (matchType === 'alt' && searchQuery) keyword = searchQuery;
@@ -1753,73 +1770,81 @@
         handleResponse(result || {}, titleElement, galleryUrl, generation);
         return { success: true, galleryUrl: galleryUrl };
       } catch (e) {
+        // URLFinder 插件不可用时，标题接口仍可能正常工作；确认标题命中后再决定是否显示错误。
+        if (generation === lrrScanGeneration && CONFIG.enableAltSearch) {
+          var fallback = await handleResponse({}, titleElement, galleryUrl, generation);
+          if (fallback && fallback.success) return { success: true, galleryUrl: galleryUrl, titleFallback: true };
+        }
         console.error('[LRR Checker] URLFinder request failed:', galleryUrl, e);
-        if (generation === lrrScanGeneration)
-          prependLrrMarker(titleElement, '(LRR ❓)', ['lrr-marker-error'], 'error', [], galleryUrl);
+        if (generation === lrrScanGeneration && !hasLrrMarker(titleElement, true))
+          prependLrrMarker(titleElement, '(LRR !)', ['lrr-marker-error'], 'error', [], galleryUrl);
         return { success: false, galleryUrl: galleryUrl, error: e };
       }
     }
 
-    async function fetchAltSearchHttp(searchQuery, altKey) {
+    async function fetchAltSearchHttp(searchQuery) {
       var params = new URLSearchParams();
-      params.set('filter', searchQuery);
+      // LRR 的双引号会设置 isexact，使标题必须整串相等；主体查询必须保持子串搜索。
+      // 去除查询操作符，并防止开头的减号把标题变成排除条件。
+      var terms = searchQuery.split(',').map(function (part) {
+        return part.replace(/["*?%_$:\\]/g, ' ').replace(/^\s*(?:-\s*)+/, '')
+          .replace(/\s+/g, ' ').trim();
+      }).filter(Boolean);
+      if (!terms.length) return { hit: false, hits: [], incomplete: true };
+      params.set('filter', terms.join(','));
       params.set('start', '0');
       params.set('groupby_tanks', 'false');
-      var searchUrl = CONFIG.lrrServerUrl + '/api/search?' + params.toString();
       var headers = {};
       if (CONFIG.lrrApiKey) headers['Authorization'] = getAuthorizationHeaderValue(CONFIG.lrrApiKey);
-
       var validateFn = function (status) { return (status >= 200 && status < 300) || status === 204; };
-      var response = await makeRequest({
-        method: 'GET', url: searchUrl, headers: headers,
-        timeout: CONFIG.searchTimeoutMs, validateStatus: validateFn
-      });
-
-      if (response.status === 204) {
-        await delay(2000);
-        response = await makeRequest({
-          method: 'GET', url: searchUrl, headers: headers,
-          timeout: CONFIG.searchTimeoutMs, validateStatus: validateFn
-        });
-      }
-      if (response.status === 204) {
-        setCache(altKey, { altHit: false, altHits: [] });
-        return { hit: false, hits: [] };
-      }
-
-      var body = (response.responseText || '').trim();
-      if (!body) { setCache(altKey, { altHit: false, altHits: [] }); return { hit: false, hits: [] }; }
-
-      var searchResult = JSON.parse(body);
-      var searchData = Array.isArray(searchResult) ? searchResult :
-        (Array.isArray(searchResult.data) ? searchResult.data : []);
-      var hasHits = searchData.length > 0 ||
-        (typeof searchResult.recordsFiltered === 'number' && searchResult.recordsFiltered > 0);
-
-      // 提取命中的归档信息用于悬浮卡展示，兼容 arcid/id 与 size/filesize。
-      var altHits = [];
-      if (hasHits) {
+      var altHits = [], ids = new Set(), start = 0;
+      // 不能只看第一页；最多取三页，截断/索引未就绪不作为“未命中”缓存。
+      for (var page = 0; page < 3; page++) {
+        params.set('start', String(start));
+        var searchUrl = CONFIG.lrrServerUrl + '/api/search?' + params.toString();
+        var options = { method: 'GET', url: searchUrl, headers: headers,
+          timeout: CONFIG.searchTimeoutMs, validateStatus: validateFn };
+        var response = await makeRequest(options);
+        if (response.status === 204) {
+          await delay(2000);
+          response = await makeRequest(options);
+        }
+        var body = (response.responseText || '').trim();
+        if (response.status === 204 || !body)
+          return { hit: altHits.length > 0, hits: altHits, incomplete: true };
+        var searchResult = JSON.parse(body);
+        var searchData = Array.isArray(searchResult) ? searchResult : searchResult && searchResult.data;
+        if (!Array.isArray(searchData)) throw new Error('Invalid LANraragi search response');
+        var previousCount = altHits.length;
         searchData.forEach(function (item) {
-          if (!item) return;
+          if (!item || !(item.id || item.arcid)) return;
+          var id = String(item.id || item.arcid);
+          if (ids.has(id)) return;
+          ids.add(id);
           altHits.push({
-            id: item.id || item.arcid || '',
+            id: id,
             title: item.title || '',
             tags: item.tags || '',
             pagecount: item.pagecount || 0,
             filesize: item.filesize || item.size || 0
           });
         });
+        start += searchData.length;
+        var total = Number(searchResult.recordsFiltered);
+        if (!Number.isFinite(total) || start >= total)
+          return { hit: altHits.length > 0, hits: altHits };
+        if (!searchData.length || previousCount === altHits.length) break;
       }
-      setCache(altKey, { altHit: hasHits, altHits: altHits });
-      return { hit: hasHits, hits: altHits };
+      return { hit: altHits.length > 0, hits: altHits, incomplete: true };
     }
 
     // 备用搜索不能“搜到任何结果就算命中”。LANraragi 的 filter 可能返回仅部分关键词相同的归档，
     // 因此先拿原始候选，再在本地做作者 + 标题二次校验，避免明显误报。
     async function performAlternativeSearch(searchQuery, sourceFullTitle, titleElement, generation) {
-      if (hasLrrMarker(titleElement)) return { success: false, skipped: true };
+      if (generation !== lrrScanGeneration) return { success: false, stale: true };
+      if (hasLrrMarker(titleElement, true)) return { success: false, skipped: true };
 
-      var filteredKey = 'lrr-checker-v5-alt-strict-' + simpleHash(sourceFullTitle + '|' + searchQuery);
+      var filteredKey = getTitleSearchCacheKey('alt-strict', sourceFullTitle + '|' + searchQuery);
       var cached = getCache(filteredKey);
       if (cached && typeof cached.altHit === 'boolean') {
         if (cached.altHit && generation === lrrScanGeneration)
@@ -1827,24 +1852,17 @@
         return { success: cached.altHit, cached: true, hits: cached.altHits || [] };
       }
 
-      var rawKey = 'lrr-checker-v4-alt-raw-' + simpleHash(searchQuery);
-      if (!altSearchInflight.has(searchQuery)) {
-        var p = runAltSearchLimited(function () { return fetchAltSearchHttp(searchQuery, rawKey); });
-        altSearchInflight.set(searchQuery, p);
-        p.catch(function () {}).finally(function () { altSearchInflight.delete(searchQuery); });
-      }
-
       try {
-        var result = await altSearchInflight.get(searchQuery);
+        var result = await getTitleSearchCandidates(searchQuery, generation);
         if (generation !== lrrScanGeneration) return { success: false, stale: true };
 
         var hits = (result && result.hits ? result.hits : []).filter(function (item) {
-          return item && item.title && isStrictCandidateMatch(sourceFullTitle, item.title);
+          return item && item.id && item.title && isStrictCandidateMatch(sourceFullTitle, item.title, item.tags);
         });
         var hit = hits.length > 0;
-        setCache(filteredKey, { altHit: hit, altHits: hits });
+        if (hit || !result.incomplete) setCache(filteredKey, { altHit: hit, altHits: hits });
 
-        if (hit && !hasLrrMarker(titleElement))
+        if (hit && !hasLrrMarker(titleElement, true))
           prependLrrMarker(titleElement, '(LRR ≈)', ['lrr-marker-file'], 'alt', hits, null, searchQuery);
         return { success: hit, hits: hits };
       } catch (e) {
@@ -1855,33 +1873,80 @@
     // 模糊匹配专用：忽略活动编号、作者组、语言/翻译/DL 等附加标签，只比较作品主体。
     function isLooseNoiseTag(value) {
       value = String(value || '').trim();
-      return /^(?:中文|中国語|中国语|中国翻訳|中国翻译|漢化|汉化|英語|英语|英文|English|Chinese|Japanese|韓国語|韩国语|DL版|Digital|Digital版|無修正|无修正|翻訳|翻译|重嵌|机翻|機翻|個人翻譯|个人翻译)$/i.test(value);
+      return /^(?:中文|中国語|中国语|中国翻訳|中国翻译|漢化|汉化|英語|英语|英文|English|Chinese|Japanese|韓国語|韩国语|DL版|Digital(?:版)?|無修正|无修正|翻訳|翻译|重嵌|机翻|機翻|個人翻譯|个人翻译|翻譯|修正版|修正|uncensored|censored|scan(?:s)?|digital edition|rewrit(?:e|ten))$/i.test(value) ||
+        /(?:汉化|漢化|翻译|翻譯|翻訳|掃圖|扫图|修图|修圖|机翻|機翻)/i.test(value) ||
+        /\b(?:translat(?:ion|ed)|scanlation)\b/i.test(value) ||
+        /^(?:C\d{2,3}|COMIC\s*(?:MARKET|CITY)\s*\d+|コミケ\s*\d+|コミックマーケット\s*\d+|COMITIA\s*\d+|コミティア\s*\d+|例大祭\s*\d+)$/i.test(value);
+    }
+
+    function prepareMatchTitle(value) {
+      value = String(value || '');
+      try { value = value.normalize('NFKC'); } catch (_) {}
+      return value.replace(/[\u200b-\u200f\u2060\ufeff]/g, '')
+        .replace(/【/g, '[').replace(/】/g, ']')
+        .replace(/\.(?:zip|cbz|cbr|rar|7z|pdf)\s*$/i, '').trim();
     }
 
     function extractLooseAuthor(fullTitle) {
-      var re = /\[([^\]]+)\]/g;
+      // 作者只从标题前缀读取；尾部的 [汉化组]、[Digital] 不能成为作者。
+      var re = /^(?:\(([^()]*)\)|\[([^\]]*)\])\s*/;
+      var rest = fullTitle, offset = 0;
       var m;
-      while ((m = re.exec(fullTitle))) {
-        var value = (m[1] || '').trim();
+      while ((m = re.exec(rest))) {
+        var value = (m[2] || m[1] || '').trim();
+        offset += m[0].length;
+        rest = rest.slice(m[0].length);
         if (!value || isLooseNoiseTag(value)) continue;
-        return { value: value, end: re.lastIndex };
+        if (m[2]) return { value: value, end: offset };
+        break;
       }
       return null;
     }
 
     function stripLooseDecorations(value) {
-      value = String(value || '');
-      try { value = value.normalize('NFKC'); } catch (_) {}
-      value = value.replace(/\.(?:zip|cbz|rar|7z)$/i, '');
-      value = value.replace(/^\s*(?:[\(\（][^\)\）]{1,50}[\)\）]\s*)+/, '');
-      value = value.replace(/\[[^\]]*\]/g, ' ');
-      value = value.replace(/(?:中国語|中国语|中国翻訳|中国翻译|中文|漢化|汉化|English|Chinese|DL版|Digital版?|翻訳|翻译|重嵌|机翻|機翻)/gi, ' ');
+      value = prepareMatchTitle(value);
+      value = value.replace(/\[([^\]]*)\]|\(([^()]*)\)/g, function (whole, square, round) {
+        return isLooseNoiseTag(square === undefined ? round : square) ? ' ' : whole;
+      });
       return value.replace(/\s+/g, ' ').trim();
     }
 
+    function normalizeTitleNumber(value) {
+      if (/^\d+(?:\.\d+)?$/.test(value)) return value.replace(/^0+(?=\d)/, '');
+      var digits = '零一二三四五六七八九';
+      if (/^[零〇一二三四五六七八九十百千]+$/.test(value)) {
+        var total = 0, digit = 0;
+        for (var i = 0; i < value.length; i++) {
+          var unit = { 十: 10, 百: 100, 千: 1000 }[value[i]];
+          if (unit) { total += (digit || 1) * unit; digit = 0; }
+          else digit = digit * 10 + Math.max(0, digits.indexOf(value[i]));
+        }
+        return String(total + digit);
+      }
+      // 罗马数字仅用于带 Vol./Chapter 等标签的数字，避免误改普通单词。
+      if (/^(?:X{0,3})(?:IX|IV|V?I{0,3})$/i.test(value) && value) {
+        var roman = { i: 1, v: 5, x: 10 }, sum = 0;
+        value = value.toLowerCase();
+        for (var j = 0; j < value.length; j++)
+          sum += roman[value[j]] < (roman[value[j + 1]] || 0) ? -roman[value[j]] : roman[value[j]];
+        return String(sum);
+      }
+      return value;
+    }
+
+    function canonicalTitleNumbers(value) {
+      return value.replace(/\b(vol(?:ume)?\.?|ch(?:apter)?\.?|ep(?:isode)?\.?|part)\s*(\d+(?:\.\d+)?|[ivx]+)\b/gi,
+        function (_, label, number) {
+          var kind = /^vol/i.test(label) ? '巻' : /^(?:ch|ep)/i.test(label) ? '話' : '部';
+          return '第' + normalizeTitleNumber(number) + kind;
+        }).replace(/第?\s*([\d零〇一二三四五六七八九十百千]+(?:\.\d+)?)\s*(巻|卷|話|话|章|部)/g,
+          function (_, number, kind) { return '第' + normalizeTitleNumber(number) + ({ 卷: '巻', 话: '話' }[kind] || kind); })
+        .replace(/\d+(?:\.\d+)?/g, normalizeTitleNumber);
+    }
+
     function normalizeLooseTitle(value) {
-      value = stripLooseDecorations(value).toLowerCase();
-      return value.replace(/[\s\-_.·・:：,，!！?？'"“”‘’~～\/\\|+*=#@<>《》「」『』【】\[\]\(\)（）]/g, '');
+      value = canonicalTitleNumbers(stripLooseDecorations(value).toLowerCase());
+      return value.replace(/[\p{P}\p{S}\s]/gu, '');
     }
 
     function looseKeyIsUseful(value) {
@@ -1913,15 +1978,12 @@
     }
 
     function extractLooseTitleParts(fullTitle) {
-      fullTitle = String(fullTitle || '').trim();
-      try { fullTitle = fullTitle.normalize('NFKC'); } catch (_) {}
+      fullTitle = prepareMatchTitle(fullTitle);
       var authorInfo = extractLooseAuthor(fullTitle);
       var tail = authorInfo ? fullTitle.slice(authorInfo.end) : fullTitle;
-      tail = tail.replace(/\[[^\]]*\]/g, ' ').replace(/\s+/g, ' ').trim();
-
-      var shortTitle = tail.replace(/\s*[\(\（][^\)\）]*[\)\）].*$/, '').trim();
-      if (!shortTitle) shortTitle = stripLooseDecorations(tail);
-      var coreTitle = stripLooseDecorations(tail || fullTitle);
+      var coreTitle = stripLooseDecorations(tail);
+      // 最末尾的圆括号通常是原作名；主体括号、方括号中的副标题仍保留。
+      var shortTitle = coreTitle.replace(/\s+\([^()]*\)\s*$/, '').trim() || coreTitle;
 
       return {
         author: authorInfo ? authorInfo.value : '',
@@ -1930,71 +1992,219 @@
       };
     }
 
-    function looseContainmentScore(a, b) {
-      if (!a || !b) return 0;
-      if (a === b) return 1;
-      var shorter = a.length <= b.length ? a : b;
-      var longer = a.length > b.length ? a : b;
-      if (!looseKeyIsUseful(shorter) || longer.indexOf(shorter) < 0) return 0;
-      return shorter.length / longer.length;
+    function looseAuthorMatch(sourceAuthor, candidateAuthor) {
+      function aliases(value) {
+        value = prepareMatchTitle(value);
+        var artists = value.match(/\(([^()]*)\)/);
+        return { artists: artists ? artists[1].split(/[,、/&]/).map(normalizeLooseTitle).filter(Boolean) : [],
+          all: [value.replace(/\([^()]*\)/g, '')].concat(artists ? artists[1].split(/[,、/&]/) : [])
+            .map(normalizeLooseTitle).filter(Boolean) };
+      }
+      var a = aliases(sourceAuthor), b = aliases(candidateAuthor);
+      // 同一社团中的不同作者不应互相命中；社团名与作者名可分别匹配缺失的另一侧。
+      var left = a.artists.length && b.artists.length ? a.artists : a.all;
+      var right = a.artists.length && b.artists.length ? b.artists : b.all;
+      return left.some(function (name) { return right.indexOf(name) >= 0; });
     }
 
-    function looseAuthorMatch(sourceAuthor, candidateAuthor) {
-      var a = normalizeLooseTitle(sourceAuthor);
-      var b = normalizeLooseTitle(candidateAuthor);
-      if (!a || !b) return false;
-      if (a === b) return true;
-      if (looseContainmentScore(a, b) >= 0.80) return true;
-      return looseDiceScore(a, b) >= 0.82;
+    function candidateAuthorEvidence(sourceAuthor, candidateParts, tags) {
+      if (!sourceAuthor) return 0;
+      var titleEvidence = candidateParts.author ? (looseAuthorMatch(sourceAuthor, candidateParts.author) ? 1 : -1) : 0;
+      if (titleEvidence < 0) return -1;
+      var tagged = (Array.isArray(tags) ? tags : String(tags || '').split(','))
+        .map(function (tag) { return String(tag).trim().match(/^(artist|group):\s*(.+)$/i); }).filter(Boolean);
+      var artists = tagged.filter(function (match) { return match[1].toLowerCase() === 'artist'; });
+      var hasSpecificArtists = /\([^()]+\)/.test(sourceAuthor) && artists.length > 0;
+      var names = (hasSpecificArtists ? artists : tagged)
+        .map(function (match) { return match[2]; });
+      if (titleEvidence > 0 && !hasSpecificArtists) return 1;
+      if (!names.length) return titleEvidence;
+      return names.some(function (name) { return looseAuthorMatch(sourceAuthor, name); }) ? 1 : -1;
+    }
+
+    function titleIdentityCompatible(a, b) {
+      // 相似度不能区分长标题末尾的 1/2、上/下、前編/後編，必须先检查这些身份信息。
+      function identity(value) {
+        value = canonicalTitleNumbers(prepareMatchTitle(value));
+        return JSON.stringify({ numbers: value.match(/\d+(?:\.\d+)?/g) || [],
+          units: value.match(/第\d+(?:\.\d+)?(?:巻|話|章|部)/g) || [],
+          parts: (value.match(/(?:上|中|下)(?:巻|卷|篇|編|编)|(?:前|後|后|番外)(?:篇|編|编)|総集編|總集篇|合本|合集|後日談/gi) || [])
+            .map(function (part) { return part.replace(/后/g, '後').replace(/[编篇]/g, '編').replace(/卷/g, '巻'); }) });
+      }
+      return identity(a) === identity(b);
+    }
+
+    function titleEditScore(a, b) {
+      if (a === b) return 1;
+      // 限制长输入的计算量；正常标题以外的输入只允许完全一致。
+      if (!a || !b || Math.max(a.length, b.length) > 512) return 0;
+      var row = Array.from({ length: b.length + 1 }, function (_, i) { return i; });
+      for (var i = 1; i <= a.length; i++) {
+        var diagonal = row[0]; row[0] = i;
+        for (var j = 1; j <= b.length; j++) {
+          var old = row[j];
+          row[j] = Math.min(row[j] + 1, row[j - 1] + 1, diagonal + (a[i - 1] === b[j - 1] ? 0 : 1));
+          diagonal = old;
+        }
+      }
+      return 1 - row[b.length] / Math.max(a.length, b.length);
+    }
+
+    function verifiedTitleMatch(sourceParts, candidateParts, authorMatched) {
+      var a = normalizeLooseTitle(sourceParts.coreTitle), b = normalizeLooseTitle(candidateParts.coreTitle);
+      if (!a || !b || !titleIdentityCompatible(sourceParts.coreTitle, candidateParts.coreTitle)) return false;
+      var sa = normalizeLooseTitle(sourceParts.shortTitle), sb = normalizeLooseTitle(candidateParts.shortTitle);
+      var useful = looseKeyIsUseful(sa) && looseKeyIsUseful(sb) && (authorMatched || Math.min(sa.length, sb.length) >= 6);
+      if (a === b) return useful;
+      if (a !== sa && b !== sb) {
+        var suffixA = sourceParts.coreTitle.match(/\s+\(([^()]*)\)\s*$/);
+        var suffixB = candidateParts.coreTitle.match(/\s+\(([^()]*)\)\s*$/);
+        if (suffixA && suffixB && normalizeLooseTitle(suffixA[1]) !== normalizeLooseTitle(suffixB[1])) return false;
+      }
+      // 允许一侧省略原作括号；两侧均有但不同的括号内容不应被忽略。
+      if ((a === sb || b === sa) && looseKeyIsUseful(sa) && looseKeyIsUseful(sb))
+        return useful;
+      // 相同的长原作名不能稀释主标题的差异，模糊评分只比较作品主体。
+      a = sa; b = sb;
+      var minLength = Math.min(a.length, b.length);
+      if (minLength < (authorMatched ? 8 : 12)) return false;
+      // 先用低成本的长度和二元组筛选，再核对字符顺序；缺少作者时提高阈值。
+      var editThreshold = authorMatched ? 0.88 : 0.94, diceThreshold = authorMatched ? 0.80 : 0.92;
+      if (minLength / Math.max(a.length, b.length) < editThreshold || looseDiceScore(a, b) < diceThreshold) return false;
+      return titleEditScore(a, b) >= editThreshold;
     }
 
     // “作者 + 标题”备用搜索的严格校验：作者必须一致，标题也必须高度相似。
-    function isStrictCandidateMatch(sourceFullTitle, candidateTitle) {
+    function isStrictCandidateMatch(sourceFullTitle, candidateTitle, candidateTags) {
       var sourceParts = extractLooseTitleParts(sourceFullTitle);
       var candidateParts = extractLooseTitleParts(candidateTitle);
-      var sourceAuthor = sourceParts.author;
-      var candidateAuthor = candidateParts.author;
-      var sourceCore = normalizeLooseTitle(sourceParts.coreTitle);
-      var candidateCore = normalizeLooseTitle(candidateParts.coreTitle);
-
-      if (!sourceAuthor || !candidateAuthor || !sourceCore || !candidateCore) return false;
-      if (!looseAuthorMatch(sourceAuthor, candidateAuthor)) return false;
-      if (sourceCore === candidateCore) return true;
-      if (looseContainmentScore(sourceCore, candidateCore) >= 0.82) return true;
-      return looseDiceScore(sourceCore, candidateCore) >= 0.86;
+      return candidateAuthorEvidence(sourceParts.author, candidateParts, candidateTags) === 1 &&
+        verifiedTitleMatch(sourceParts, candidateParts, true);
     }
 
-    function isLooseCandidateMatch(sourceFullTitle, searchTitle, candidateTitle) {
+    function isLooseCandidateMatch(sourceFullTitle, searchTitle, candidateTitle, candidateTags) {
       var sourceParts = extractLooseTitleParts(sourceFullTitle);
       var candidateParts = extractLooseTitleParts(candidateTitle);
-      var sourceCore = normalizeLooseTitle(sourceParts.coreTitle);
-      var queryCore = normalizeLooseTitle(searchTitle);
-      var candidateCore = normalizeLooseTitle(candidateParts.coreTitle);
+      var evidence = candidateAuthorEvidence(sourceParts.author, candidateParts, candidateTags);
+      if (evidence < 0) return false;
+      // searchTitle 仅用于召回，不参与判定，防止截短查询绕过完整标题校验。
+      return verifiedTitleMatch(sourceParts, candidateParts, evidence > 0);
+    }
 
-      if (!candidateCore) return false;
+    function getPossibleMatchReason(reason) {
+      if (reason === 'series') return t('标题相似，但卷号或篇章标注不同', 'Similar title, but volume or story-part annotations differ');
+      if (reason === 'author') return t('标题非常接近，但作者标注不同', 'Very similar title, but author annotations differ');
+      if (reason === 'same-author') return t('作者一致，标题相似，可能是不同翻译或版本', 'Same author and similar title; possibly another translation or edition');
+      return t('标题相似，作者信息不足，需人工确认', 'Similar title with limited author evidence; manual confirmation needed');
+    }
 
-      var sourceAuthor = sourceParts.author;
-      var candidateAuthor = candidateParts.author;
-      var authorMatched = !!(sourceAuthor && candidateAuthor && looseAuthorMatch(sourceAuthor, candidateAuthor));
+    function getPossibleTitleMatch(sourceFullTitle, candidateTitle, candidateTags) {
+      var source = extractLooseTitleParts(sourceFullTitle), candidate = extractLooseTitleParts(candidateTitle);
+      var a = normalizeLooseTitle(source.shortTitle), b = normalizeLooseTitle(candidate.shortTitle);
+      var minLength = Math.min(a.length, b.length), maxLength = Math.max(a.length, b.length);
+      var evidence = candidateAuthorEvidence(source.author, candidate, candidateTags);
+      if (minLength < (evidence > 0 ? 6 : 8)) return null;
+      if (maxLength > 512 || minLength / maxLength < (evidence < 0 ? 0.94 : evidence > 0 ? 0.62 : 0.80)) return null;
+      var dice = looseDiceScore(a, b);
+      if (dice < (evidence > 0 ? 0.60 : 0.78)) return null;
+      var edit = titleEditScore(a, b);
+      var containment = a.includes(b) || b.includes(a) ? minLength / maxLength : 0;
+      if (evidence < 0) {
+        if (minLength < 12 || edit < 0.94 || dice < 0.92) return null;
+      } else if (evidence > 0) {
+        if (!(edit >= 0.62 && dice >= 0.62) && containment < 0.65) return null;
+      } else if (!(edit >= 0.80 && dice >= 0.80) && containment < 0.85) return null;
+      return {
+        similarity: (edit + dice) / 2,
+        possibleReason: evidence < 0 ? 'author' : !titleIdentityCompatible(source.coreTitle, candidate.coreTitle)
+          ? 'series' : evidence > 0 ? 'same-author' : 'title'
+      };
+    }
 
-      // 两边都有作者时，作者对不上直接排除；这是压低误报最有效的一道门槛。
-      if (sourceAuthor && candidateAuthor && !authorMatched) return false;
+    function classifyTitleCandidates(sourceFullTitle, searchTitle, candidates) {
+      var hits = [], possibleHits = [], seen = new Set();
+      (candidates || []).forEach(function (item) {
+        if (!item || !item.id || !item.title) return;
+        // 源链接确认过的画廊标题是该归档的可靠别名，可跨越库内罗马音与日文的差异。
+        var title = item.matchTitle || item.title, tags = item.matchTitle ? '' : item.tags;
+        var key = item.id + '|' + title;
+        if (seen.has(key)) return;
+        seen.add(key);
+        if (isLooseCandidateMatch(sourceFullTitle, searchTitle, title, tags)) {
+          if (!hits.some(function (hit) { return hit.id === item.id; })) hits.push(item);
+          return;
+        }
+        var match = getPossibleTitleMatch(sourceFullTitle, title, tags);
+        if (match) possibleHits.push(Object.assign({}, item, match));
+      });
+      possibleHits.sort(function (a, b) { return b.similarity - a.similarity; });
+      var possibleIds = new Set();
+      return { hits: hits, possibleHits: possibleHits.filter(function (item) {
+        if (possibleIds.has(item.id)) return false;
+        possibleIds.add(item.id); return true;
+      }).slice(0, 5) };
+    }
 
-      if (sourceCore === candidateCore || queryCore === candidateCore) return true;
+    function renderLrrTitleResult(titleElement, hits, possible, searchTitle) {
+      if (!hits.length || hasLrrMarker(titleElement, true)) return;
+      prependLrrMarker(titleElement, possible ? '(LRR ?)' : '(LRR ≈)',
+        [possible ? 'lrr-marker-possible' : 'lrr-marker-file'], possible ? 'possible' : 'alt-loose', hits, null, searchTitle);
+    }
 
-      var containment = Math.max(
-        looseContainmentScore(sourceCore, candidateCore),
-        looseContainmentScore(queryCore, candidateCore)
-      );
-      var dice = Math.max(
-        looseDiceScore(sourceCore, candidateCore),
-        looseDiceScore(queryCore, candidateCore)
-      );
+    function getKnownLrrTitleMatches(sourceFullTitle, searchTitle) {
+      var server = typeof CONFIG === 'object' ? String(CONFIG.lrrServerUrl || '') : '';
+      return classifyTitleCandidates(sourceFullTitle, searchTitle, Array.from(knownLrrTitleAliases.values())
+        .filter(function (alias) { return alias.lrrServer === server; }));
+    }
 
-      // 有作者佐证时仍要求标题至少 78% 包含覆盖或 80% Dice；
-      // 候选缺作者时，仅凭标题必须达到更高阈值，避免常见短标题误撞。
-      if (authorMatched) return containment >= 0.78 || dice >= 0.80;
-      return containment >= 0.88 || dice >= 0.88;
+    function registerKnownLrrTitle(sourceFullTitle, hit, generation) {
+      if (generation !== lrrScanGeneration || !hit || !hit.id || !sourceFullTitle) return;
+      var server = typeof CONFIG === 'object' ? String(CONFIG.lrrServerUrl || '') : '';
+      var alias = Object.assign({}, hit, { title: hit.title || sourceFullTitle, matchTitle: sourceFullTitle, lrrServer: server });
+      knownLrrTitleAliases.set(server + '|' + hit.id + '|' + sourceFullTitle, alias);
+      if (!CONFIG.enableAltSearch) return;
+      // 只传播已被源链接证实存在的归档；普通相似提示不能再成为传播依据。
+      collectLrrGalleryEntries().forEach(function (entry) {
+        if (!entry.titleElement || !entry.titleElement.isConnected || hasLrrMarker(entry.titleElement, true)) return;
+        var fullTitle = getGalleryTitlePlain(entry.titleElement);
+        var result = classifyTitleCandidates(fullTitle, '', [alias]);
+        if (result.hits.length) { renderLrrTitleResult(entry.titleElement, result.hits, false, ''); return; }
+        if (!result.possibleHits.length) return;
+        var scope = getLrrMarkerScope(entry.titleElement);
+        var marker = scope && scope.querySelector('.lrr-marker-span');
+        if (marker && marker.classList.contains('lrr-marker-possible') &&
+          Number(marker.dataset.lrrScore) >= result.possibleHits[0].similarity) return;
+        renderLrrTitleResult(entry.titleElement, result.possibleHits, true, '');
+      });
+    }
+
+    function getTitleSearchCacheKey(kind, value) {
+      var server = typeof CONFIG === 'object' ? String(CONFIG.lrrServerUrl || '') : '';
+      // 新增疑似匹配层后，绕过旧版未命中缓存。
+      return 'lrr-checker-v8-' + kind + '-' + simpleHash(server + '|' + value);
+    }
+
+    async function getTitleSearchCandidates(query, generation) {
+      if (generation !== lrrScanGeneration) return { hits: [], incomplete: true };
+      var rawKey = getTitleSearchCacheKey('raw', query);
+      var cached = getCache(rawKey);
+      if (cached && typeof cached.altHit === 'boolean') return { hits: cached.altHits || [] };
+      var inflightKey = generation + '|' + rawKey;
+      if (!altSearchInflight.has(inflightKey)) {
+        var promise = runAltSearchLimited(async function () {
+          if (generation !== lrrScanGeneration) return { hits: [], incomplete: true };
+          var result = await fetchAltSearchHttp(query);
+          if (generation === lrrScanGeneration && !result.incomplete)
+            setCache(rawKey, { altHit: result.hits.length > 0, altHits: result.hits });
+          return result;
+        });
+        altSearchInflight.set(inflightKey, promise);
+        var cleanup = function () {
+          if (altSearchInflight.get(inflightKey) === promise) altSearchInflight.delete(inflightKey);
+        };
+        promise.then(cleanup, cleanup);
+      }
+      return altSearchInflight.get(inflightKey);
     }
 
     function buildLooseSearchQueries(searchTitle) {
@@ -2006,50 +2216,69 @@
         .forEach(function (word) {
           if (queries.length < 4 && queries.indexOf(word) < 0) queries.push(word);
         });
+      // 连续日文/中文标题没有空格，前后片段可召回含一个错字或不同分隔符的标题。
+      if (words.length === 1 && /^[\u3040-\u30ff\u3400-\u9fff]{8,}$/.test(words[0])) {
+        var middle = Math.floor(words[0].length / 2);
+        [words[0].slice(0, middle), words[0].slice(middle)].forEach(function (part) {
+          if (queries.length < 4 && queries.indexOf(part) < 0) queries.push(part);
+        });
+      }
       return queries;
     }
 
     async function performLooseTitleSearch(searchTitle, sourceFullTitle, titleElement, generation) {
-      if (hasLrrMarker(titleElement)) return { success: false, skipped: true };
+      if (generation !== lrrScanGeneration) return { success: false, stale: true };
+      if (hasLrrMarker(titleElement, true)) return { success: true, skipped: true };
 
       var normalizedQuery = normalizeLooseTitle(searchTitle);
       if (!looseKeyIsUseful(normalizedQuery)) return { success: false, skipped: true };
 
       // 新缓存前缀避免旧版“未命中”缓存阻止新的宽松匹配。
-      var filteredKey = 'lrr-checker-v5-loose-' + simpleHash(sourceFullTitle + '|' + searchTitle);
+      var filteredKey = getTitleSearchCacheKey('loose', sourceFullTitle + '|' + searchTitle);
+      var known = getKnownLrrTitleMatches(sourceFullTitle, searchTitle);
+      if (known.hits.length) {
+        renderLrrTitleResult(titleElement, known.hits, false, searchTitle);
+        return { success: true, hits: known.hits, possible: false };
+      }
       var cached = getCache(filteredKey);
       if (cached && typeof cached.altHit === 'boolean') {
-        if (cached.altHit && generation === lrrScanGeneration && !hasLrrMarker(titleElement))
-          prependLrrMarker(titleElement, '(LRR ≈)', ['lrr-marker-file'], 'alt-loose', cached.altHits || [], null, searchTitle);
-        return { success: cached.altHit, cached: true };
+        var cachedHits = cached.altHit ? cached.altHits || [] : known.possibleHits;
+        var cachedPossible = cached.altHit ? cached.altKind === 'possible' : true;
+        renderLrrTitleResult(titleElement, cachedHits, cachedPossible, searchTitle);
+        return { success: cachedHits.length > 0, cached: true, hits: cachedHits, possible: cachedPossible && cachedHits.length > 0 };
       }
 
       try {
         var queries = buildLooseSearchQueries(searchTitle);
-        var hits = [];
+        var candidates = known.possibleHits.slice(), hits = [], possibleHits = [], incomplete = false, lastError;
         for (var i = 0; i < queries.length; i++) {
-          if (generation !== lrrScanGeneration || hasLrrMarker(titleElement))
-            return { success: false, stale: true };
-          var query = queries[i];
-          var rawKey = 'lrr-checker-v5-loose-raw-' + simpleHash(query);
-          var result = await runAltSearchLimited(function () {
-            return fetchAltSearchHttp(query, rawKey);
-          });
           if (generation !== lrrScanGeneration) return { success: false, stale: true };
+          if (hasLrrMarker(titleElement, true)) return { success: true, skipped: true };
+          var query = queries[i];
+          var result;
+          try { result = await getTitleSearchCandidates(query, generation); }
+          catch (e) { incomplete = true; lastError = e; continue; }
+          if (generation !== lrrScanGeneration) return { success: false, stale: true };
+          incomplete = incomplete || !!result.incomplete;
           // 回退词只负责召回，始终用完整标题校验，不能把相同关键词当作相同作品。
-          hits = (result && result.hits ? result.hits : []).filter(function (item) {
-            return item && item.title && isLooseCandidateMatch(sourceFullTitle, searchTitle, item.title);
-          });
+          candidates = candidates.concat(result.hits || []);
+          var classified = classifyTitleCandidates(sourceFullTitle, searchTitle, candidates);
+          hits = classified.hits;
           if (hits.length) break;
         }
-
+        if (generation !== lrrScanGeneration) return { success: false, stale: true };
+        // 后返回的源链接命中也可以补充别名；疑似候选不妨碍继续寻找更可靠的命中。
+        var latestKnown = getKnownLrrTitleMatches(sourceFullTitle, searchTitle);
+        var finalResult = classifyTitleCandidates(sourceFullTitle, searchTitle,
+          candidates.concat(latestKnown.hits, latestKnown.possibleHits));
+        hits = finalResult.hits;
+        possibleHits = finalResult.possibleHits;
+        var possible = !hits.length && possibleHits.length > 0;
+        if (possible) hits = possibleHits;
         var hit = hits.length > 0;
-        setCache(filteredKey, { altHit: hit, altHits: hits });
-
-        if (hit && !hasLrrMarker(titleElement))
-          prependLrrMarker(titleElement, '(LRR ≈)', ['lrr-marker-file'], 'alt-loose', hits, null, searchTitle);
-
-        return { success: hit, hits: hits };
+        if (hit || !incomplete) setCache(filteredKey, { altHit: hit, altHits: hits, altKind: possible ? 'possible' : 'verified' });
+        renderLrrTitleResult(titleElement, hits, possible, searchTitle);
+        return { success: hit, hits: hits, possible: possible, error: lastError };
       } catch (e) {
         return { success: false, error: e, hits: [] };
       }
@@ -2057,13 +2286,14 @@
 
     function handleResponse(result, titleElement, galleryUrl, generation) {
       if (generation !== undefined && generation !== lrrScanGeneration) return;
-      if (hasLrrMarker(titleElement)) return;
       if (isUrlfinderHit(result)) {
         log('[LRR Checker] Found: ' + galleryUrl + ' [' + (result.matchType || 'URL匹配') + ']');
         var exactHit = extractUrlfinderHit(result);
         prependLrrMarker(titleElement, '(LRR ✔)', ['lrr-marker-downloaded'], 'urlfinder', exactHit ? [exactHit] : [], galleryUrl);
-        return;
+        registerKnownLrrTitle(getGalleryTitlePlain(titleElement), exactHit, generation);
+        return { success: true };
       }
+      if (hasLrrMarker(titleElement, true)) return { success: true, skipped: true };
       if (!CONFIG.enableAltSearch) return;
 
       var fullTitle = getGalleryTitlePlain(titleElement);
@@ -2075,13 +2305,14 @@
 
       // 一级：作者 + 主标题；二级：主标题单独搜索 + 宽松候选过滤。
       if (author && author !== title) {
-        performAlternativeSearch(author + ',' + title, fullTitle, titleElement, generation).then(function (r) {
-          if (r && r.success) return;
-          if (generation !== lrrScanGeneration || hasLrrMarker(titleElement)) return;
-          performLooseTitleSearch(title, fullTitle, titleElement, generation);
+        return performAlternativeSearch(author + ',' + title, fullTitle, titleElement, generation).then(function (r) {
+          if (r && r.success) return r;
+          if (generation !== lrrScanGeneration) return { success: false, stale: true };
+          if (hasLrrMarker(titleElement, true)) return { success: true, skipped: true };
+          return performLooseTitleSearch(title, fullTitle, titleElement, generation);
         });
       } else {
-        performLooseTitleSearch(title, fullTitle, titleElement, generation);
+        return performLooseTitleSearch(title, fullTitle, titleElement, generation);
       }
     }
 
@@ -2551,7 +2782,7 @@
       <button id="eh-tb-save" class="eh-tb-btn eh-tb-btn-primary">保存并刷新</button>
       <button id="eh-tb-reset" class="eh-tb-btn eh-tb-btn-secondary">恢复默认</button>
     </div>
-    <div class="eh-tb-footer">ExHentai Library Toolkit v1.1.4 | 悬浮按钮开关面板 · 长按标题拖动</div>
+    <div class="eh-tb-footer">ExHentai Library Toolkit v1.1.5 | 悬浮按钮开关面板 · 长按标题拖动</div>
   </div>
 </div>`;
 
@@ -2608,7 +2839,7 @@
       <button id="eh-gdl-save" class="eh-tb-btn eh-gdl-btn-save">保存下载设置</button>
     </div>
     <div class="eh-gdl-hint">仅获取元数据：按“压缩包名称”设置生成带 [仅元数据] 前缀的 ZIP，内含 metadata.json 和 info.json，不下载图片，保存到浏览器下载目录。</div>
-    <div class="eh-tb-footer">ExHentai Library Toolkit v1.1.4 · Pure Browser Downloader · LRR info.json</div>
+    <div class="eh-tb-footer">ExHentai Library Toolkit v1.1.5 · Pure Browser Downloader · LRR info.json</div>
   </div>
 </div>`
 
@@ -2937,6 +3168,7 @@
 .eh-uncensored-marker { color: #fff; background: #b45309; cursor: default; }
 .lrr-marker-downloaded { color: #fff; background: linear-gradient(135deg, #28a745, #49995d); }
 .lrr-marker-file { color: #fff; background: linear-gradient(135deg, #356ddc, #894ab0); }
+.lrr-marker-possible { color: #241600; background: linear-gradient(135deg, #ffcd57, #f3a43b); }
 .lrr-marker-error { color: #fff; background: linear-gradient(135deg, #dc3545, #e05656); }
 
 /* LRR Hover Card */
