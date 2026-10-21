@@ -71,12 +71,14 @@ test('fallback requests are bounded and stale scans cannot add markers or cache 
 });
 
 test('page rescan removes current strict and loose negative caches', () => {
-  const ctx = load({ simpleHash: value => value, getGalleryTitlePlain: value => value });
+  const ctx = load({ simpleHash: value => value, getGalleryTitlePlain: value => value, CONFIG: { lrrServerUrl: 'http://lrr.test' } });
   const parts = ctx.extractLooseTitleParts(translated);
   const cache = new Map([
-    ['lrr-checker-v2-gallery', {}],
+    ['lrr-checker-v9-http://lrr.test-gallery', {}],
     ['lrr-checker-v5-alt-strict-' + translated + '|' + parts.author + ',' + parts.shortTitle, { altHit: false }],
     ['lrr-checker-v5-loose-' + translated + '|' + parts.shortTitle, { altHit: false }],
+    // 另一个 LRR 服务器的同 URL 缓存必须保留：URL 结论按服务器隔离。
+    ['lrr-checker-v9-http://other-gallery', {}],
     ['unrelated', {}],
   ]);
   Object.assign(ctx, {
@@ -88,7 +90,7 @@ test('page rescan removes current strict and loose negative caches', () => {
   assert.ok(end > start);
   vm.runInContext(source.slice(start, end), ctx);
   assert.equal(ctx.clearCurrentPageLrrCache(), 3);
-  assert.deepEqual([...cache.keys()], ['unrelated']);
+  assert.deepEqual([...cache.keys()], ['lrr-checker-v9-http://other-gallery', 'unrelated']);
 });
 
 test('prefix parsing handles events, Unicode and translator suffixes without losing real title words', () => {
@@ -525,20 +527,19 @@ test('possible cache metadata survives compaction and expires sooner than verifi
   assert.equal(ctx.getCache('verified').altKind, 'verified');
 });
 
-test('possible and failed lookup badges use different symbols and explain the candidate', () => {
+test('possible-match badge explains the candidate without claiming a confirmed duplicate', () => {
   let inserted;
   const row = { isConnected: true, querySelectorAll: () => [] };
-  const { ctx } = searchContext({ t: zh => zh, getLrrMarkerScope: () => row, getGalleryTitlePlain: () => 'source',
+  const { ctx } = searchContext({ t: zh => zh, CONFIG: { uiLanguage: 'zh' }, getLrrMarkerScope: () => row, getGalleryTitlePlain: () => 'source',
     getGalleryMarkerGroup: () => ({ insertBefore: node => { inserted = node; }, firstChild: null }),
     document: { createElement: () => ({ dataset: {}, classList: { add() {} }, addEventListener() {} }) } });
-  const start = source.indexOf('    function prependLrrMarker(');
+  const start = source.indexOf('    var sitePageCounts = new Map();');
   vm.runInContext(source.slice(start, source.indexOf('    function getGalleryMarkerGroup(', start)), ctx);
   ctx.prependLrrMarker(row, '(LRR ?)', ['lrr-marker-possible'], 'possible', [{ id: 'saved', title: 'Library Candidate', possibleReason: 'series', similarity: 0.9 }]);
   assert.match(inserted.title, /库中可能已有/);
   assert.match(inserted.title, /卷号/);
   assert.match(inserted.title, /Library Candidate/);
   assert.equal(inserted.dataset.lrrScore, '0.9');
-  ctx.prependLrrMarker(row, '(LRR !)', ['lrr-marker-error'], 'error', []);
-  assert.match(inserted.title, /请求失败/);
-  assert.doesNotMatch(inserted.title, /可能已有/);
+  // 查重失败不再有任何徽标：预览文案里也不能出现「请求失败」这类逐条提示。
+  assert.doesNotMatch(inserted.title, /请求失败/);
 });

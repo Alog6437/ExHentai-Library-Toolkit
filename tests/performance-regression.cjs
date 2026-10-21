@@ -235,10 +235,13 @@ test('OPFS cleanup retries locked entries and removes only stale downloader ZIPs
 test('uncensored batches preserve matching, cache reuse, redraw and failure recovery', async () => {
   const requests = [], rendered = [];
   let entries = Array.from({ length: 26 }, (_, i) => ({ key: `${i + 1}/a`, galleryUrl: `${i + 1}/a`, titleElement: i + 1 }));
-  const ctx = load('    function hasUncensoredTag(', '    function getAuthorizationHeaderValue(', {
+  const ctx = load('    var sitePageCounts = new Map();', '    function getAuthorizationHeaderValue(', {
     CONFIG: { enableUncensoredLabel: true }, window: { location: { hostname: 'exhentai.org' } },
     collectLrrGalleryEntries: () => entries,
     extractGalleryIdentity: url => ({ gid: url.split('/')[0], token: 'a' }),
+    // 页数提示在 gdata 到达后刷新徽标标题；这里没有徽标，返回空列表即可。
+    document: { querySelectorAll: () => [] },
+    t: zh => zh,
     galleryTextRequest: async (_, method, body) => {
       const batch = JSON.parse(body).gidlist;
       requests.push(batch);

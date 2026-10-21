@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name        ExHentai Library Toolkit
 // @namespace   https://github.com/Alog6437/ExHentai-Library-Toolkit
-// @version     1.1.5
+// @version     1.2.0
 // @description  ExHentai/E-Hentai 一体化工具：LANraragi 查重、纯浏览器图片 ZIP 下载与元数据打包、快捷收藏、全局搜索、翻译高亮及统一悬浮面板。
 // @description:en  All-in-one ExHentai/E-Hentai toolkit with LANraragi duplicate checking, image ZIP downloads, metadata, favorites, search and translation highlighting.
 // @author      Alog6437
@@ -17,6 +17,7 @@
 // @grant        GM.setValue
 // @grant        GM.getValue
 // @grant        GM_registerMenuCommand
+// @grant        GM_info
 // @connect      *
 // @run-at       document-start
 // @license MIT
@@ -232,6 +233,9 @@
     var ZIP32_MAX = 0xffffffff;
     var GALLERY_DL_FAST_RETRIES = 3;
     var GALLERY_DL_RECOVERY_ROUNDS = 3;
+    // OPFS 不可用时才退回内存 ZIP。内存模式会把整库字节留在标签页里，
+    // 超过这个上限就明确报错，避免页面直接 OOM 崩溃。
+    var MEMORY_ZIP_LIMIT = 512 * 1024 * 1024;
 
     function warnBeforeLeavingDownload(event) {
       if (!galleryDlBusy) return;
@@ -626,9 +630,29 @@
       return out;
     }
 
-    function MemoryZipSink() { this.parts = []; }
-    MemoryZipSink.prototype.write = function (bytes) { this.parts.push(bytes); return Promise.resolve(); };
-    MemoryZipSink.prototype.finish = function () { return Promise.resolve(new Blob(this.parts, { type: 'application/zip' })); };
+    function MemoryZipSink() { this.parts = []; this.size = 0; }
+    MemoryZipSink.prototype.write = function (bytes) {
+      var length = bytes && (bytes.byteLength || bytes.length) || 0;
+      if (this.size + length > MEMORY_ZIP_LIMIT) {
+        var limitError = new Error(t('当前浏览器不支持 OPFS，内存模式上限 ',
+          'OPFS is unavailable; the in-memory mode limit is ') + formatGalleryDlBytes(MEMORY_ZIP_LIMIT) +
+          t('，请改用压缩图、减少页数或更换浏览器',
+            '. Use compressed images, download fewer pages, or switch browsers.'));
+        limitError.galleryCode = 'memory-zip-limit';
+        limitError.galleryFatal = true;
+        return Promise.reject(limitError);
+      }
+      this.size += length;
+      this.parts.push(bytes);
+      return Promise.resolve();
+    };
+    MemoryZipSink.prototype.finish = function () {
+      var blob = new Blob(this.parts, { type: 'application/zip' });
+      // Blob 已经在构造时快照字节，这里立刻释放分片，避免下载完成后整库仍占内存。
+      this.parts.length = 0;
+      this.size = 0;
+      return Promise.resolve(blob);
+    };
     MemoryZipSink.prototype.abort = function () { this.parts.length = 0; return Promise.resolve(); };
     MemoryZipSink.prototype.cleanup = function () { this.parts.length = 0; return Promise.resolve(); };
 
@@ -686,9 +710,16 @@
     };
     OpfsZipSink.prototype.cleanup = function () { return removeOpfsEntryWithRetry(this.root, this.name); };
 
+    // 内存回退的原因：状态栏要明确告诉用户正在用哪种模式。
+    var zipSinkFallbackReason = '';
+
     async function createZipSink(tempName) {
       try { return await OpfsZipSink.create(tempName); }
-      catch (e) { return new MemoryZipSink(); }
+      catch (e) {
+        zipSinkFallbackReason = e && e.message ? e.message : String(e);
+        warn('[EH Downloader] OPFS 不可用，已退回内存 ZIP：', zipSinkFallbackReason);
+        return new MemoryZipSink();
+      }
     }
 
     function StreamingZipWriter(sink) {
@@ -959,6 +990,15 @@
         await cleanupGalleryDlTempFiles(60 * 60 * 1000, tempName);
         var sink = await createZipSink(tempName);
         zip = new StreamingZipWriter(sink);
+        var memoryMode = !!zipSinkFallbackReason;
+        zipSinkFallbackReason = '';
+        if (memoryMode) {
+          // 内存模式无法流式落盘，大图库会在写入上限处停下：先把风险说清楚。
+          updateGalleryDlStatus(statusBox, 'checking',
+            t('内存模式（OPFS 不可用）', 'In-memory mode (OPFS unavailable)'),
+            t('图片会全部缓存在标签页内存中，达到 ', 'Images are buffered in tab memory; the limit is ') +
+              formatGalleryDlBytes(MEMORY_ZIP_LIMIT) + t(' 后停止写入', ' and writing stops there'));
+        }
         var actualWorkers = Math.max(1, Math.min(cfg.galleryDlParallel, imagePages.length));
         var stats = { started: Date.now(), networkBytes: 0, savedBytes: 0, done: 0, total: totalPages, workers: actualWorkers };
         var downloadStates = imagePages.map(function () { return { nlToken: '', lastError: null }; });
@@ -1061,7 +1101,7 @@
         var blob = await zip.finish();
         triggerZipDownload(blob, zipName);
         refreshMetrics('done');
-        updateGalleryDlStatus(statusBox, 'online', t('下载完成', 'Download complete'), zipName + ' · ' + stats.done + t(' 页 · ', ' pages · ') + formatGalleryDlBytes(stats.savedBytes));
+        updateGalleryDlStatus(statusBox, 'online', t('下载完成', 'Download complete'), zipName + ' · ' + stats.done + t(' 页 · ', ' pages · ') + formatGalleryDlBytes(stats.savedBytes) + (memoryMode ? t(' · 内存模式', ' · in-memory mode') : ''));
         // Anchor downloads expose no completion event. Keep the OPFS-backed File
         // readable while the browser copies it, then remove it after a safe grace period.
         cleanupTimer = setTimeout(async function () {
@@ -1126,7 +1166,7 @@
       if (cached) {
         try {
           var parsed = JSON.parse(cached);
-          var ttl = (parsed.data && (parsed.data.altHit === false || parsed.data.altKind === 'possible')) || /^lrr-checker-v\d+-raw-/.test(key)
+          var ttl = (parsed.data && (parsed.data.altHit === false || parsed.data.altKind === 'possible' || parsed.data.miss === true)) || /^lrr-checker-v\d+-raw-/.test(key)
             ? LRR_NEGATIVE_CACHE_EXPIRE : CACHE_DURATION;
           if (parsed.timestamp && (Date.now() - parsed.timestamp) < ttl) return parsed.data;
         } catch (e) { localStorage.removeItem(key); }
@@ -1159,6 +1199,8 @@
         }
         var out = {};
         if (typeof original === 'object' && original) {
+          // miss 标记让 getCache 用负缓存 TTL（5 分钟），避免未命中结论挂 30 分钟。
+          if (original.miss === true) out.miss = true;
           if ('success' in original) out.success = original.success;
           if (original.error) out.error = original.error;
           if (original.matchType) out.matchType = original.matchType;
@@ -1229,12 +1271,18 @@
       return 'lrr-checker-v2-alt-' + simpleHash(author + ',' + title);
     }
 
+    // URL 精确结果必须按 LRR 服务器隔离：换服务器后旧结论会指向另一个库。
+    // 函数声明会被提升，列表扫描处（collectGalleriesFromDom）可直接调用。
+    function getUrlCacheKey(galleryUrl) {
+      return 'lrr-checker-v9-' + simpleHash(String(CONFIG.lrrServerUrl || '')) + '-' + galleryUrl;
+    }
+
     // 只清当前页面涉及的LRR缓存
     function clearCurrentPageLrrCache() {
       var removed = 0;
       var entries = collectLrrGalleryEntries();
       entries.forEach(function (entry) {
-        var exactKey = 'lrr-checker-v2-' + entry.galleryUrl;
+        var exactKey = getUrlCacheKey(entry.galleryUrl);
         if (localStorage.getItem(exactKey) !== null) {
           localStorage.removeItem(exactKey);
           removed++;
@@ -1263,6 +1311,10 @@
     function rescanCurrentPage(clearPageCache) {
       lrrScanGeneration++;
       if (clearPageCache !== false) clearCurrentPageLrrCache();
+      // 手动重扫相当于重新开始：允许再次汇总失败提示，并重置重试预算。
+      lrrLookupFailureCount = 0;
+      lrrLastFailureNoticeAt = 0;
+      lrrLookupRetries.clear();
 
       document.querySelectorAll('.lrr-marker-span').forEach(function (el) { el.remove(); });
       seenGalleryUrls.clear();
@@ -1300,6 +1352,27 @@
       if (sub) sub.textContent = detail || '';
     }
 
+    var lrrLookupFailureCount = 0;
+    var lrrLastFailureNoticeAt = 0;
+    // 失败条目最多自动重试两次；LRR 长时间不可用时不至于每轮扫描都重发整页请求。
+    var lrrLookupRetries = new Map();
+
+    // 查重失败只在面板状态里汇总，绝不给单个图库贴红标：
+    // 「不在库里」本来就该什么都没有。失败条目会从本页已处理集合移除，下一轮扫描自动重试。
+    function noticeLrrLookupFailure(error) {
+      lrrLookupFailureCount++;
+      var box = typeof document !== 'undefined' && document.getElementById
+        ? document.getElementById('eh-tb-lrr-status') : null;
+      if (!box) return;
+      var now = Date.now();
+      if (now - lrrLastFailureNoticeAt < 5000) return;
+      lrrLastFailureNoticeAt = now;
+      var reason = error && error.message ? String(error.message) : String(error || '');
+      updateLrrStatus(box, 'offline',
+        t('LRR：查重请求失败（未命中的条目不做标记）', 'LRR: lookup requests failed (unmatched rows stay unmarked)'),
+        reason.slice(0, 160) + ' · ' + t('失败 ', 'failed ') + lrrLookupFailureCount + t(' 条', ' lookups'));
+    }
+
     async function testLrrConnection(statusBox, button) {
       if (!CONFIG.lrrServerUrl) {
         updateLrrStatus(statusBox, 'offline', t('LRR：未配置', 'LRR: Not configured'), t('请先填写 LANraragi 服务器地址', 'Please enter the LANraragi server address first'));
@@ -1335,11 +1408,66 @@
       }
     }
 
+    var lrrRescanPollTimer = null;
+
+    function stopLrrRescanPolling() {
+      if (lrrRescanPollTimer) {
+        clearInterval(lrrRescanPollTimer);
+        lrrRescanPollTimer = null;
+      }
+    }
+
+    // LANraragi 没有重扫进度接口，这里用 /api/info 的归档数做启发式判断：
+    // 数量连续几次不变，就认为索引已经稳定。
+    function watchLrrRescanProgress(statusBox) {
+      stopLrrRescanPolling();
+      var startedAt = Date.now();
+      var lastTotal = null;
+      var stableSamples = 0;
+      var failures = 0;
+      var busy = false;
+      var SETTLE_SAMPLES = 3;
+      var MAX_POLL_MS = 5 * 60 * 1000;
+      lrrRescanPollTimer = setInterval(async function () {
+        if (!statusBox || statusBox.isConnected === false) { stopLrrRescanPolling(); return; }
+        if (Date.now() - startedAt > MAX_POLL_MS) {
+          stopLrrRescanPolling();
+          updateLrrStatus(statusBox, 'checking',
+            t('LRR：重扫仍在后台进行', 'LRR: rescan still running in the background'),
+            t('已等待超过 5 分钟，请直接到 LANraragi 查看索引状态', 'Waited over 5 minutes; check the index status in LANraragi'));
+          return;
+        }
+        if (busy) return;
+        busy = true;
+        var info = null;
+        try { info = await fetchLrrServerInfo(); failures = 0; }
+        catch (e) { failures++; busy = false; if (failures >= 3) stopLrrRescanPolling(); return; }
+        busy = false;
+        var total = info && info.total_archives !== undefined ? Number(info.total_archives) : null;
+        if (total === null || !isFinite(total)) return;
+        if (total === lastTotal) stableSamples++;
+        else { lastTotal = total; stableSamples = 0; }
+        var elapsed = Math.round((Date.now() - startedAt) / 1000);
+        if (stableSamples >= SETTLE_SAMPLES && elapsed >= 15) {
+          stopLrrRescanPolling();
+          updateLrrStatus(statusBox, 'online',
+            t('LRR：重扫已完成', 'LRR: rescan finished'),
+            t('索引归档 ', 'Indexed archives: ') + total + t(' 本 · 用时约 ', ' · took about ') + elapsed
+              + t(' 秒 · 可点「重新扫描当前页」刷新本页标记', 's · click "Rescan current page" to refresh markers on this page'));
+          return;
+        }
+        updateLrrStatus(statusBox, 'checking',
+          t('LRR：正在重扫档案文件夹…', 'LRR: rescanning the archive folder…'),
+          t('索引归档 ', 'Indexed archives: ') + total + t(' 本 · 已等待 ', ' · elapsed ') + elapsed + t(' 秒', 's'));
+      }, 3000);
+    }
+
     async function triggerLrrContentRescan(statusBox, button) {
       if (button) {
         button.disabled = true;
         button.textContent = t('正在触发重扫...', 'Starting rescan...');
       }
+      stopLrrRescanPolling();
       updateLrrStatus(
         statusBox,
         'checking',
@@ -1357,6 +1485,7 @@
           t('LRR：已触发档案目录重扫', 'LRR: Archive-folder rescan started'),
           pidDetail
         );
+        if (statusBox) watchLrrRescanProgress(statusBox);
         return result;
       } catch (e) {
         var reason = e && e.message ? e.message : String(e);
@@ -1421,9 +1550,72 @@
     }
 
     function openLrrSearch(keyword) {
-      if (!keyword) return;
-      var url = CONFIG.lrrServerUrl + '/search?search=' + encodeURIComponent(keyword);
-      window.open(url, '_blank');
+      if (!keyword || !CONFIG.lrrServerUrl) return;
+      var url = CONFIG.lrrServerUrl + '/search?filter=' + encodeURIComponent(keyword);
+      window.open(url, '_blank', 'noopener');
+    }
+
+    // 徽标点击优先直接打开库内归档的介绍页（LANraragi /reader?id=）。
+    function openLrrArchive(archiveId) {
+      if (!CONFIG.lrrServerUrl || !archiveId) return false;
+      window.open(CONFIG.lrrServerUrl + '/reader?id=' + encodeURIComponent(String(archiveId)), '_blank', 'noopener');
+      return true;
+    }
+
+    // 页数只作弱证据提示，绝不参与「是否存在」的判定：
+    // 归档常被删掉汉化组页与尾部广告页，与本站页数不同是正常现象。
+    var sitePageCounts = new Map();
+
+    function galleryKeyForElement(element) {
+      if (!element || !element.closest) return '';
+      var container = element.closest('.gl1t, tr, .gl1e, .gl1c, .gl1m, .gl2c, .gl2m, .gl3c, .gl3m');
+      var link = container && container.querySelector('a[href*="/g/"]');
+      var identity = link ? extractGalleryIdentity(link.href) : null;
+      return identity ? identity.gid + '/' + identity.token : '';
+    }
+
+    // 容忍几页差异：删 1-2 张汉化组页 + 1-2 张广告页很常见，按约 12%（至少 4 页）放宽。
+    function pageCountTolerance(sitePages) {
+      return Math.max(4, Math.round((Number(sitePages) || 0) * 0.12));
+    }
+
+    function describePageCount(sourcePages, candidatePages) {
+      var sitePages = parseInt(sourcePages, 10) || 0;
+      var libraryPages = parseInt(candidatePages, 10) || 0;
+      if (!libraryPages) return '';
+      var isEnglish = CONFIG.uiLanguage === 'en';
+      if (!sitePages) return (isEnglish ? 'Library pages: ' : '库内页数：') + libraryPages;
+      var diff = Math.abs(sitePages - libraryPages);
+      var head = (isEnglish ? 'Pages: site ' : '页数：本站 ') + sitePages
+        + (isEnglish ? ' / library ' : ' / 库内 ') + libraryPages;
+      if (!diff) return head + (isEnglish ? ' (identical)' : '（一致）');
+      if (diff <= pageCountTolerance(sitePages)) {
+        return head + (isEnglish
+          ? ' (differs by ' + diff + '; likely removed credit/ad pages, still the same work)'
+          : '（差 ' + diff + ' 页，可能已删汉化组页或广告页，仍视为同一作品）');
+      }
+      return head + (isEnglish
+        ? ' (differs by ' + diff + '; likely a different edition, please verify)'
+        : '（差 ' + diff + ' 页，差异较大，可能是不同版本，建议核对）');
+    }
+
+    function applyMarkerTitle(marker, titleElement) {
+      if (!marker) return;
+      var base = marker.dataset.ehBaseTitle || '';
+      var libraryPages = Number(marker.dataset.ehLibraryPages || 0);
+      var key = galleryKeyForElement(titleElement || marker);
+      var pageLine = libraryPages ? describePageCount(key ? sitePageCounts.get(key) : 0, libraryPages) : '';
+      var hint = marker.dataset.ehArchiveId
+        ? t('点击打开库内归档介绍页', 'Click to open the archive page in your library')
+        : t('点击在 LANraragi 中搜索', 'Click to search in LANraragi');
+      marker.title = base + (pageLine ? '\n' + pageLine : '') + '\n' + hint;
+    }
+
+    // gdata 到达后补上页数提示；徽标本身不重建，避免打断点击。
+    function refreshLrrPageHints() {
+      document.querySelectorAll('.lrr-marker-span').forEach(function (marker) {
+        if (marker.dataset.ehBaseTitle) applyMarkerTitle(marker);
+      });
     }
 
     // ✔=源链接命中，≈=高相似标题，?=疑似已有，!=请求失败。
@@ -1442,12 +1634,16 @@
       markerSpan.dataset.lrrScore = String(hits[0] && hits[0].similarity || 0);
       var explanation = matchType === 'possible'
         ? t('库中可能已有，请核对候选作品', 'Possibly in your library; check the candidate')
-        : matchType === 'error' ? t('查重请求失败，尚未确认库内状态', 'Lookup failed; library status is unknown')
         : matchType === 'urlfinder' ? t('库中已存在：源链接匹配', 'In your library: matching source URL')
         : t('库中存在高度相似的标题，请核对版本', 'A highly similar title exists; check the edition');
       if (hits[0] && hits[0].possibleReason) explanation += '\n' + getPossibleMatchReason(hits[0].possibleReason);
       if (hits[0] && hits[0].title) explanation += '\n' + t('候选：', 'Candidate: ') + String(hits[0].title).slice(0, 240);
-      markerSpan.title = explanation + '\n' + t('点击在 LANraragi 中搜索', 'Click to search in LANraragi');
+      // 页数提示延迟到 applyMarkerTitle 生成，gdata 页数稍后到达时可以刷新。
+      markerSpan.dataset.ehBaseTitle = explanation;
+      markerSpan.dataset.ehLibraryPages = String(hits[0] && hits[0].pagecount || 0);
+
+      var hitId = hits[0] && hits[0].id ? String(hits[0].id) : '';
+      markerSpan.dataset.ehArchiveId = hitId;
 
       var keyword = '';
       if (matchType === 'alt' && searchQuery) keyword = searchQuery;
@@ -1464,11 +1660,14 @@
       markerSpan.addEventListener('mouseup', function (e) { e.stopPropagation(); }, true);
       markerSpan.addEventListener('click', function (e) {
         stopEvent(e);
+        // 命中/疑似候选都带着库内归档 ID：直接打开它的介绍页，比再搜一次更省事。
+        if (hitId && openLrrArchive(hitId)) return;
         openLrrSearch(keyword);
       }, true);
 
       var group = getGalleryMarkerGroup(titleElement);
       group.insertBefore(markerSpan, group.firstChild);
+      applyMarkerTitle(markerSpan, titleElement);
     }
 
     // Shared row keeps duplicate and uncensored badges side by side in every list mode.
@@ -1547,10 +1746,13 @@
                 uncensoredTagCache.set(entry.key, { value: false, expires: Date.now() + 60000 });
                 return;
               }
+              // 同时记下站点页数，供查重徽标的页数提示使用（仅提示，不参与判定）。
+              sitePageCounts.set(entry.key, parseInt(meta.filecount, 10) || 0);
               var value = hasUncensoredTag(meta.tags);
               uncensoredTagCache.set(entry.key, { value: value, expires: Date.now() + 5 * 60 * 1000 });
               renderUncensoredLabel(entry.titleElement, value);
             });
+            refreshLrrPageHints();
           } catch (e) {
             batch.forEach(function (entry) { uncensoredTagCache.set(entry.key, { value: false, expires: Date.now() + 60000 }); });
             warn('[EH Uncensored] metadata request failed:', e);
@@ -1590,24 +1792,49 @@
     async function requestLrrContentRescan() {
       if (!CONFIG.lrrServerUrl)
         throw new Error(t('请先配置 LANraragi 服务器地址', 'Configure the LANraragi server address first'));
-      if (!CONFIG.lrrApiKey)
-        throw new Error(t('重新扫描档案文件夹需要 API Key', 'Rescanning the archive folder requires an API key'));
 
+      // 有 Key 就带上；LANraragi 在未启用密码时允许匿名 API，不必强行要求填写。
+      var headers = {};
+      if (CONFIG.lrrApiKey) headers.Authorization = getAuthorizationHeaderValue(CONFIG.lrrApiKey);
+
+      // 自己接管状态码，才能把 LANraragi 返回的 JSON 错误信息读出来。
       var response = await makeRequest({
         method: 'POST',
         url: CONFIG.lrrServerUrl + '/api/shinobu/rescan',
-        headers: { 'Authorization': getAuthorizationHeaderValue(CONFIG.lrrApiKey) }
+        headers: headers,
+        validateStatus: function () { return true; }
       });
+
+      var status = Number(response.status) || 0;
       var body = (response.responseText || '').trim();
+      var parsed = null;
+      if (body) { try { parsed = JSON.parse(body); } catch (_) { parsed = null; } }
+      // 只取结构化错误字段；success:0 的响应没有 error 时不能用整段 JSON 当文案。
+      var payloadMessage = parsed && (parsed.error || parsed.message || parsed.successMessage)
+        ? String(parsed.error || parsed.message || parsed.successMessage).trim()
+        : '';
+      var httpMessage = payloadMessage || body.slice(0, 200);
+
+      if (status === 401 || status === 403) {
+        throw new Error(t('API Key 不正确或无权限', 'API key is incorrect or lacks permission')
+          + (CONFIG.lrrApiKey ? '' : t('（当前未填写 API Key）', ' (no API key configured)'))
+          + ' · HTTP ' + status);
+      }
+      if (status === 404) {
+        throw new Error(t('接口不存在，请检查服务器地址与子路径', 'Endpoint not found; check the server address and path prefix')
+          + ' · HTTP 404');
+      }
+      if (status >= 400) {
+        throw new Error(t('LANraragi 拒绝请求', 'LANraragi rejected the request') + ' · HTTP ' + status
+          + (httpMessage ? ' · ' + httpMessage : ''));
+      }
       if (!body) throw new Error(t('LRR 重扫接口返回为空', 'The LRR rescan endpoint returned an empty response'));
 
-      var result;
-      try { result = JSON.parse(body); }
-      catch (_) { throw new Error(t('LRR 重扫接口返回了无效 JSON', 'The LRR rescan endpoint returned invalid JSON')); }
-      if (!result || (result.success !== 1 && result.success !== '1')) {
-        throw new Error(result && (result.error || result.successMessage)
-          ? String(result.error || result.successMessage)
-          : t('LANraragi 未确认重扫成功', 'LANraragi did not confirm a successful rescan'));
+      var result = parsed;
+      if (!result) throw new Error(t('LRR 重扫接口返回了无效 JSON', 'The LRR rescan endpoint returned invalid JSON'));
+      if (result.success !== 1 && result.success !== '1') {
+        throw new Error((payloadMessage ? payloadMessage + ' · ' : '')
+          + t('LANraragi 未确认重扫成功', 'LANraragi did not confirm a successful rescan'));
       }
       return result;
     }
@@ -1630,6 +1857,14 @@
     function isUrlfinderHit(result) {
       // URLFinder 的 success 代表插件结果；同时要求返回归档 ID，避免空 data 被误标为已下载。
       return !!extractUrlfinderHit(result);
+    }
+
+    // 插件明确报错时不能当成「库里没有」，否则故障会被写进未命中缓存。
+    function urlfinderReportedFailure(result) {
+      if (!result || typeof result !== 'object') return false;
+      // 只有插件明确带错误信息才算失败。success:0 也可能表示「没有命中」，
+      // 拿它当失败会让所有不在库里的图库都被当成异常。
+      return typeof result.error === 'string' && result.error.trim() !== '';
     }
 
     function delay(ms) {
@@ -1741,6 +1976,10 @@
           try {
             debugLog('URLFinder尝试', urls[i]);
             var current = await requestUrlfinder(urls[i]);
+            if (urlfinderReportedFailure(current)) {
+              throw new Error(t('URLFinder 插件返回失败：', 'URLFinder plugin reported a failure: ')
+                + String(current.error || 'success=0').slice(0, 200));
+            }
             successCount++;
             lastValidResult = current;
 
@@ -1766,18 +2005,28 @@
         // 所有URLFinder请求都失败才标记为错误。
         if (!result && successCount === 0) throw (lastError || new Error('URLFinder请求全部失败'));
 
-        setCache(cacheKey, result || {});
+        // 命中才缓存完整结果；未命中写 miss 标记，走 5 分钟负缓存，
+        // 这样刚入库的作品不会长时间显示「库里没有」。
+        setCache(cacheKey, isUrlfinderHit(result) ? result : { miss: true });
         handleResponse(result || {}, titleElement, galleryUrl, generation);
         return { success: true, galleryUrl: galleryUrl };
       } catch (e) {
-        // URLFinder 插件不可用时，标题接口仍可能正常工作；确认标题命中后再决定是否显示错误。
+        // URLFinder 插件不可用时，标题接口仍可能正常工作；确认标题命中后再决定如何提示。
         if (generation === lrrScanGeneration && CONFIG.enableAltSearch) {
           var fallback = await handleResponse({}, titleElement, galleryUrl, generation);
           if (fallback && fallback.success) return { success: true, galleryUrl: galleryUrl, titleFallback: true };
         }
         console.error('[LRR Checker] URLFinder request failed:', galleryUrl, e);
-        if (generation === lrrScanGeneration && !hasLrrMarker(titleElement, true))
-          prependLrrMarker(titleElement, '(LRR !)', ['lrr-marker-error'], 'error', [], galleryUrl);
+        if (generation === lrrScanGeneration) {
+          // 不在库里就不该有任何标记：失败只在面板状态里汇总，逐条贴红标只是噪音。
+          // 前两次失败从本页已处理集合移除，下一轮扫描自动重试；此后不再自动重发。
+          noticeLrrLookupFailure(e);
+          var retried = lrrLookupRetries.get(galleryUrl) || 0;
+          if (retried < 2) {
+            lrrLookupRetries.set(galleryUrl, retried + 1);
+            seenGalleryUrls.delete(galleryUrl);
+          }
+        }
         return { success: false, galleryUrl: galleryUrl, error: e };
       }
     }
@@ -2022,6 +2271,23 @@
       return names.some(function (name) { return looseAuthorMatch(sourceAuthor, name); }) ? 1 : -1;
     }
 
+    // 裸卷标注（写作「作品名 上」而不是「上巻」）同样决定作品身份，
+    // 否则同一系列的上/下卷会被判成同一部。只认被首尾或分隔符包围的裸标注，
+    // 避免把「上下巻」「以上」「前作」这类词内字符误当成卷号。
+    var BARE_VOLUME_PATTERN = /(^|[\s\u3000()[\]{}<>【】「」『』、,，.。:：;；\/／|｜_~〜·・—–―-])(上|中|下|前|後|后|番外)(?=$|[\s\u3000()[\]{}<>【】「」『』、,，.。:：;；\/／|｜_~〜·・—–―-])/g;
+
+    function bareVolumeParts(value) {
+      var found = [];
+      var match;
+      BARE_VOLUME_PATTERN.lastIndex = 0;
+      while ((match = BARE_VOLUME_PATTERN.exec(value))) {
+        found.push(match[2]);
+        // 零长度匹配时强制前进，避免正则死循环。
+        if (BARE_VOLUME_PATTERN.lastIndex <= match.index) BARE_VOLUME_PATTERN.lastIndex = match.index + 1;
+      }
+      return found;
+    }
+
     function titleIdentityCompatible(a, b) {
       // 相似度不能区分长标题末尾的 1/2、上/下、前編/後編，必须先检查这些身份信息。
       function identity(value) {
@@ -2029,6 +2295,7 @@
         return JSON.stringify({ numbers: value.match(/\d+(?:\.\d+)?/g) || [],
           units: value.match(/第\d+(?:\.\d+)?(?:巻|話|章|部)/g) || [],
           parts: (value.match(/(?:上|中|下)(?:巻|卷|篇|編|编)|(?:前|後|后|番外)(?:篇|編|编)|総集編|總集篇|合本|合集|後日談/gi) || [])
+            .concat(bareVolumeParts(value))
             .map(function (part) { return part.replace(/后/g, '後').replace(/[编篇]/g, '編').replace(/卷/g, '巻'); }) });
       }
       return identity(a) === identity(b);
@@ -2373,7 +2640,7 @@
 
         // DOM 被页面脚本重绘后，旧 marker 可能消失。先从缓存恢复，再用 seen 去重网络请求。
         if (hasLrrMarker(titleElement)) { seenGalleryUrls.add(galleryUrl); return; }
-        var cacheKey = 'lrr-checker-v2-' + galleryUrl;
+        var cacheKey = getUrlCacheKey(galleryUrl);
         var cachedData = getCache(cacheKey);
         if (cachedData) {
           handleResponse(cachedData, titleElement, galleryUrl, lrrScanGeneration);
@@ -2782,7 +3049,7 @@
       <button id="eh-tb-save" class="eh-tb-btn eh-tb-btn-primary">保存并刷新</button>
       <button id="eh-tb-reset" class="eh-tb-btn eh-tb-btn-secondary">恢复默认</button>
     </div>
-    <div class="eh-tb-footer">ExHentai Library Toolkit v1.1.5 | 悬浮按钮开关面板 · 长按标题拖动</div>
+    <div class="eh-tb-footer">ExHentai Library Toolkit <span class="eh-tb-version"></span> | 悬浮按钮开关面板 · 长按标题拖动</div>
   </div>
 </div>`;
 
@@ -2839,7 +3106,7 @@
       <button id="eh-gdl-save" class="eh-tb-btn eh-gdl-btn-save">保存下载设置</button>
     </div>
     <div class="eh-gdl-hint">仅获取元数据：按“压缩包名称”设置生成带 [仅元数据] 前缀的 ZIP，内含 metadata.json 和 info.json，不下载图片，保存到浏览器下载目录。</div>
-    <div class="eh-tb-footer">ExHentai Library Toolkit v1.1.5 · Pure Browser Downloader · LRR info.json</div>
+    <div class="eh-tb-footer">ExHentai Library Toolkit <span class="eh-tb-version"></span> · Pure Browser Downloader · LRR info.json</div>
   </div>
 </div>`
 
@@ -3169,7 +3436,6 @@
 .lrr-marker-downloaded { color: #fff; background: linear-gradient(135deg, #28a745, #49995d); }
 .lrr-marker-file { color: #fff; background: linear-gradient(135deg, #356ddc, #894ab0); }
 .lrr-marker-possible { color: #241600; background: linear-gradient(135deg, #ffcd57, #f3a43b); }
-.lrr-marker-error { color: #fff; background: linear-gradient(135deg, #dc3545, #e05656); }
 
 /* LRR Hover Card */
 `;
@@ -3308,6 +3574,7 @@
       ensurePanelCss();
       var panelContainer = document.createElement('div');
       panelContainer.innerHTML = localizeHtml(GALLERY_DL_PANEL_HTML);
+      fillPanelVersion(panelContainer);
       var panel = panelContainer.firstElementChild;
       document.body.appendChild(panel);
       panel.style.display = 'none';
@@ -3348,6 +3615,18 @@
       updateGalleryDlPreview(panel);
     }
 
+    // 版本号只维护 @version 一处；面板页脚运行时读取，避免多处手写不一致。
+    var SCRIPT_VERSION = '';
+    try {
+      if (typeof GM_info !== 'undefined' && GM_info && GM_info.script && GM_info.script.version)
+        SCRIPT_VERSION = String(GM_info.script.version);
+    } catch (e) {}
+
+    function fillPanelVersion(container) {
+      var node = container && container.querySelector('.eh-tb-version');
+      if (node) node.textContent = SCRIPT_VERSION ? 'v' + SCRIPT_VERSION : '';
+    }
+
     function ensurePanelCss() {
       if (document.getElementById('eh-toolbox-style')) return;
       var style = document.createElement('style');
@@ -3364,6 +3643,7 @@
       // 注入 HTML
       var panelContainer = document.createElement('div');
       panelContainer.innerHTML = localizeHtml(PANEL_HTML);
+      fillPanelVersion(panelContainer);
       var panel = panelContainer.firstElementChild;
       
       document.body.appendChild(panel);
