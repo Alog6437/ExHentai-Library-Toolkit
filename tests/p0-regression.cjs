@@ -8,7 +8,7 @@ const source = fs.readFileSync(path.join(__dirname, '../ExHentai_Library_Toolkit
 
 // 与其它回归测试一致：按函数边界切片，把纯逻辑载入独立上下文。
 function slice(startMarker, endMarker, globals = {}) {
-  const context = vm.createContext(globals);
+  const context = vm.createContext({ recordRuntimeLog: () => {}, runtimeConsole: () => {}, ...globals });
   const start = source.indexOf(startMarker);
   const end = source.indexOf(endMarker, start);
   assert.ok(start >= 0 && end > start, `缺少切片边界：${startMarker} → ${endMarker}`);

@@ -1,0 +1,36 @@
+{
+  "desktop": {
+    "x": 1084,
+    "y": 60,
+    "width": 340,
+    "height": 404
+  },
+  "mobile": {
+    "x": 34,
+    "y": 60,
+    "width": 340,
+    "height": 538
+  },
+  "browserErrors": [],
+  "externalNetworkRequests": [],
+  "checks": [
+    "real userscript initialization",
+    "top-right launcher and downward panel",
+    "new configuration concurrency 5",
+    "short viewport containment",
+    "single launcher",
+    "three tabs",
+    "compact desktop panel",
+    "dark and light themes",
+    "masked API key",
+    "download pause abort",
+    "separate current and average speeds",
+    "pause freezes average across periodic tick",
+    "single-line sync label desktop and mobile",
+    "collapse preserves task",
+    "download resumes with saved progress",
+    "discard cleanup",
+    "mobile viewport containment",
+    "removed UI recovery"
+  ]
+}

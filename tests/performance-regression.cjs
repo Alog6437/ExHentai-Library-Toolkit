@@ -5,30 +5,46 @@ const vm = require('node:vm');
 const { test } = require('node:test');
 
 const source = fs.readFileSync(path.join(__dirname, '../ExHentai_Library_Toolkit.user.js'), 'utf8');
-test('floating buttons switch mutually exclusive panels and do not cancel downloads', () => {
-  const panels = {
-    '#eh-toolbox-panel': { style: { display: 'none' }, classList: { remove() {} } },
-    '#eh-gallerydl-panel': { style: { display: 'none' }, classList: { remove() {} } },
-  };
-  const ctx = load('    function toggleLrrFloatPanel(', '    function createLrrFloatBall(', {
-    document: { querySelector: selector => panels[selector] },
-    galleryDlBusy: true, updateGalleryDlPreview: () => {},
+test('one compact shell switches mutually exclusive tabs and never cancels downloads', () => {
+  const node = attrs => ({ attrs: { ...attrs }, style: { display: 'none' },
+    getAttribute(key) { return this.attrs[key]; }, setAttribute(key, value) { this.attrs[key] = value; } });
+  const shell = node({ 'data-tab': 'download' }), launcher = node({});
+  const buttons = ['download', 'check', 'settings'].map(tab => node({ 'data-eh-tab': tab }));
+  const views = ['check', 'settings'].map(tab => node({ 'data-eh-view': tab }));
+  const download = node({}), toolbox = node({});
+  shell.querySelectorAll = () => buttons;
+  shell.querySelector = selector => selector === '#eh-gallerydl-panel' ? download : toolbox;
+  toolbox.querySelectorAll = () => views;
+  const ctx = load('    function setToolkitTab(', '    function ensureToolkitShell(', {
+    document: { getElementById: id => id === 'eh-toolkit-shell' ? shell : launcher },
+    galleryDlBusy: true, toolkitLauncher: null, updateGalleryDlPreview: () => {},
   });
-  const start = source.indexOf('    function toggleGalleryDlPanel(');
-  vm.runInContext(source.slice(start, source.indexOf('    function createGalleryDlFloatBall(', start)), ctx);
-  const state = () => Object.values(panels).map(panel => panel.style.display);
+  for (const [startToken, endToken] of [
+    ['    function toggleLrrFloatPanel(', '    function createLrrFloatBall('],
+    ['    function toggleGalleryDlPanel(', '    function createGalleryDlFloatBall('],
+  ]) {
+    const start = source.indexOf(startToken);
+    vm.runInContext(source.slice(start, source.indexOf(endToken, start)), ctx);
+  }
   ctx.toggleLrrFloatPanel();
-  assert.deepEqual(state(), ['block', 'none']);
+  assert.equal(shell.style.display, 'flex');
+  assert.equal(shell.attrs['data-tab'], 'settings');
+  assert.deepEqual(views.map(v => v.hidden), [true, false]);
+  ctx.setToolkitTab('check');
+  assert.deepEqual(views.map(v => v.hidden), [false, true]);
+  assert.deepEqual(buttons.map(b => b.attrs['aria-selected']), ['false', 'true', 'false']);
   ctx.toggleGalleryDlPanel();
-  assert.deepEqual(state(), ['none', 'block']);
+  assert.equal(shell.attrs['data-tab'], 'download');
+  assert.equal(download.style.display, 'block');
+  assert.equal(toolbox.style.display, 'none');
   ctx.toggleGalleryDlPanel();
-  assert.deepEqual(state(), ['none', 'none']);
-  ctx.toggleGalleryDlPanel(true);
+  assert.equal(shell.style.display, 'none');
+  assert.equal(launcher.attrs['aria-expanded'], 'false');
   ctx.toggleLrrFloatPanel(true);
   ctx.toggleLrrFloatPanel(true);
-  assert.deepEqual(state(), ['block', 'none']);
+  assert.equal(shell.style.display, 'flex');
   ctx.toggleLrrFloatPanel();
-  assert.deepEqual(state(), ['none', 'none']);
+  assert.equal(shell.style.display, 'none');
   assert.equal(ctx.galleryDlBusy, true);
 });
 
@@ -57,11 +73,10 @@ test('unfinished downloads request native leave confirmation and remove it when 
     assert.equal(listeners.size, 0);
   }
   assert.equal(prevented, 2);
-  for (const name of ['startGalleryMetadataDownload', 'startGalleryDlDownload']) {
+  for (const name of ['startGalleryDlDownload']) {
     const start = source.indexOf('    async function ' + name + '(');
-    const end = name === 'startGalleryMetadataDownload'
-      ? source.indexOf('    async function startGalleryDlDownload(', start)
-      : source.indexOf('    var CACHE_DURATION', start);
+    assert.ok(start >= 0);
+    const end = source.indexOf('    var CACHE_DURATION', start);
     const body = source.slice(start, end);
     assert.match(body, /setGalleryDownloadBusy\(true\)/);
     assert.match(body, /finally\s*\{[\s\S]*setGalleryDownloadBusy\(false\)/);
@@ -143,9 +158,13 @@ test('UI watchdog restores removed panels and ancestors, ignores unrelated remov
 test('download rendering is throttled while final states and latest counters are preserved', () => {
   let now = 1000;
   const updates = [];
+  let heartbeat, stopped = 0, currentBps = 123;
   const ctx = load('        var lastMetricsUpdate = 0;', '        async function worker(', {
     Date: { now: () => now },
     stats: { started: 1000, networkBytes: 0, savedBytes: 0, done: 0, total: 100, workers: 2 },
+    speedMeter: { snapshot: () => ({ currentBps, averageBps: 100 }) },
+    setInterval: (fn, ms) => { assert.equal(ms, 1000); heartbeat = fn; return 1; },
+    clearInterval: () => {}, stopMetricsTimer: () => stopped++, task: { stopped: false },
     statusBox: {}, updateGalleryDlMetrics: (_, metrics) => updates.push(metrics),
   });
   for (let i = 0; i < 1000; i++) {
@@ -162,6 +181,14 @@ test('download rendering is throttled while final states and latest counters are
   assert.equal(updates.at(-1).downloaded_files, 100);
   assert.equal(updates.at(-1).downloaded_bytes, 999);
   assert.equal(updates.at(-1).status, 'done');
+  currentBps = 0;
+  heartbeat(); // No network events: a heartbeat still repaints the expired window.
+  assert.equal(updates.length, 13);
+  assert.equal(updates.at(-1).speed_bps, 0);
+  assert.equal(updates.at(-1).average_speed_bps, 100);
+  ctx.task.stopped = true; heartbeat();
+  assert.equal(stopped, 1);
+  assert.equal(updates.length, 13, 'stopped task cannot repaint via timer');
 });
 
 test('gallery retries recover transient failures but stop immediately for site-wide failures', async () => {

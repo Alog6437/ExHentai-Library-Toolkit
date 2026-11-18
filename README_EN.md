@@ -1,8 +1,8 @@
 # ExHentai Library Toolkit
 
-**Current version: 1.2.0**
+**Current version: 1.3.7**
 
-All-in-one userscript for ExHentai / E-Hentai: **LANraragi duplicate checking**, browser-only original-image ZIP downloads, metadata packaging, quick favorites, search and UI enhancements.
+All-in-one userscript for ExHentai / E-Hentai: **LANraragi duplicate checking**, browser-only original-image ZIP downloads with optional metadata, Chinese/English translation highlighting and uncensored labels.
 
 **[简体中文](README.md) | English**
 
@@ -27,12 +27,10 @@ All-in-one userscript for ExHentai / E-Hentai: **LANraragi duplicate checking**,
 | --- | --- |
 | LANraragi duplicate check | Shows `✔` (already in library), `≈` (highly similar) or `?` (possible) on gallery lists; clicking a badge opens the matching archive page |
 | Original-image ZIP download | Runs entirely in the browser — no gallery-dl, Python or local service. Choose originals or resized images; the ZIP is written while images download |
-| Metadata packaging | Bundles `metadata.json` plus a LANraragi-compatible `info.json`; a metadata-only ZIP is also available |
-| Quick favorites | One-click favoriting on both detail and list pages, with a configurable default category |
-| Global search | Search entry on list pages that jumps to the site's advanced search |
+| Metadata packaging | Optionally bundles `metadata.json` and a LANraragi-compatible `info.json` inside the image ZIP |
 | Translation highlighting | Highlights Chinese or English translations depending on the UI language |
 | Uncensored label | Marks galleries that actually carry the `uncensored` tag (not guessed from titles) and batches page-count lookups for the duplicate-check hints |
-| Floating panels | Separate tool and download launchers; draggable with remembered position, one panel open at a time |
+| Compact toolkit | A single small launcher; Download / Check / Settings share one compact panel with infrequent options collapsed |
 
 ---
 
@@ -56,7 +54,7 @@ Adult scripts can also be found on [Sleazy Fork](https://sleazyfork.org/). Those
 
 1. Download `ExHentai_Library_Toolkit.user.js` from this repository.
 2. Drag the file into a browser window, or use your manager's "Utilities → Import".
-3. Confirm the installed version is **1.2.0** (the panel footer shows the version too), then reload the page.
+3. Confirm the installed version is **1.3.7** (the panel footer shows the version too), then reload the page.
 
 ### Updating and removing
 
@@ -75,20 +73,22 @@ Adult scripts can also be found on [Sleazy Fork](https://sleazyfork.org/). Those
 
 ### 1. First run: configure LANraragi (optional)
 
-Duplicate checking is optional; downloads, favorites, search and the other enhancements work without it.
+Duplicate checking is optional; downloads, translation highlighting and uncensored labels work without it.
 
-1. Click the floating tool button and open **tool settings**.
+1. Click the small **EL launcher** in the top-right corner, select **Settings**, and expand the LRR connection group.
 2. Enter **LRR server**, e.g. `http://192.168.1.100:3000` (include `http://` or `https://`).
-3. Enter the **API key**: required when LANraragi has a password enabled, may be left empty otherwise.
-4. Enable **duplicate checking** and adjust **primary concurrency** (default 8) and **fallback search concurrency** (default 2) if needed.
+3. Enter the **API key** only when configuring or replacing it. Saved keys are never populated into the page input; saving a blank input preserves the existing key. Select **Clear saved API key** to delete it (clearing takes precedence over replacement). No key is needed when LANraragi authentication is disabled.
+4. Enable **duplicate checking**. Defaults normally suffice; expand **LRR performance** only if you need to change primary concurrency (default 8) or fallback search concurrency (default 2).
 5. Click **Save & Reload**.
 6. Click **Test LRR connection**; the status line shows `LRR: online · version x.y.z · N archives`.
 
-> **Note:** the API key is stored in plain text in the userscript's own storage (`GM_setValue`) and is only sent in the `Authorization` header. It never appears in URLs, ZIP files or console logs — but avoid publishing screenshots or exported settings that contain it.
+> **Note:** the API key is stored in plain text in the userscript's own storage (`GM_setValue`) and is only sent in the `Authorization` header. It never appears in URLs, ZIP files or console logs. Settings show only whether a key is configured and clear temporary input on save, never displaying the saved value. This reduces accidental exposure but is not complete isolation: the host page and other page scripts can still read a newly typed key while it is in the input. Avoid publishing screenshots or exported settings that contain it.
+
+Primary duplicate checks and fallback searches each share a stable concurrency pool within the page. Dynamically added galleries, overlapping scans and manual rescans do not create extra pools. Stale/detached queued galleries are skipped; in-flight requests continue occupying their slots until completion. Limits do not extend across tabs or include independent index synchronization, connection tests or downloads.
 
 ### 2. Gallery lists: reading the badges
 
-Open any list page (front page, search results, favorites, tags…). The script checks galleries automatically and inserts a badge next to each title:
+Open any list page (front page, search results, favorites, tags…). The script checks galleries against its persistent local library index and inserts a badge next to each title; remote lookup remains available while no local index is ready:
 
 | Badge | Meaning | What to do |
 | --- | --- | --- |
@@ -100,6 +100,16 @@ Open any list page (front page, search results, favorites, tags…). The script 
 - **Click** a badge to open that archive's page in LANraragi (`server/reader?id=<archive id>`); it falls back to a search page only when no archive id is available.
 - **Hover** a badge to see the verdict, possible-match reason, candidate title and page-count comparison.
 - In thumbnail mode the badge sits on the top-left corner of the cover; in other modes it is placed before the title.
+
+#### Persistent local library index
+
+- The first enabled session fetches library metadata in bulk through LANraragi's `/api/archives`, without per-archive requests or downloading comic files.
+- Only necessary metadata such as archive IDs, titles, tags and page counts is stored in the userscript manager's persistent storage. No folder permission is needed; closing the browser or rebooting does not clear it.
+- Background synchronization runs every **30 minutes**, isolated by server and credentials. Metadata is refreshed even when archive counts stay unchanged, so renames, tag edits and equal-count replacements are included.
+- The **Check** tab displays indexed archive count, last successful synchronization and current status, with a **Sync now** action. Existing manual page rescans and query-cache clearing also trigger synchronization; failures never delete the saved complete index.
+- A complete previous snapshot remains usable during updates. Validation or storage errors preserve it and trigger retry backoff. Misses in an expired snapshot can fall back to remote lookup.
+- Source URL, author, volume and story-part verification remain strict; matching page counts never establish a duplicate.
+- Synchronization only runs while a matching page and the script are active. Reopening loads the saved index before refreshing it if needed. Removing the script and its stored data clears the index.
 
 ### 3. Page counts and deleted pages
 
@@ -113,44 +123,49 @@ Archives often have the opening scanlation-credit page and trailing ad pages rem
 
 ### 4. Detail page: downloading a gallery
 
-Open the download panel from the download floating button:
+Click the **EL launcher** in the top-right corner and select **Download**:
 
 1. **ZIP name**: original/Japanese title by default, or switch to the English/Chinese/Romaji title.
 2. **Download originals**, or uncheck it to use the displayed compressed/resized images.
-3. **Parallel tasks**: 1–4 is a safe range; higher values are more likely to be throttled.
-4. Optionally **Check download source** to validate the image pages and original-image entry without downloading.
-5. Click **Download Gallery**: images are numbered `001.ext`, `002.ext`…, packed into a ZIP and handed to the browser.
+3. **Parallel tasks**: new configurations default to 5; existing saved settings are preserved, so select 5 manually after upgrading if desired. Lower this on weak connections or when throttled; more parallelism is not always faster.
+4. Click **Download Gallery**: gallery information and image sources are validated and resolved automatically, images are numbered `001.ext`, `002.ext`…, packed into a ZIP and handed to the browser. No separate source check is needed.
 
 Behaviour notes:
 
+- Downloads and ZIP writes use a bounded pipeline: workers continue after queue admission instead of waiting for each disk write. ZIP writes remain serialized, and recovery/export waits for the queue to drain.
+- The write queue holds at most 10 images and normally up to 64 MiB, including the active write. A larger single image is admitted alone. Each network worker may additionally hold one image awaiting admission, so **64 MiB is not a total tab-memory limit**; the in-memory ZIP limit of 512 MB still applies. Runtime diagnostics include queue peaks, disk-write time and backpressure wait time. Actual throughput still depends on the image source and network.
+- **Current speed** is the combined image traffic over the last 5 seconds divided by 5 seconds, refreshed every second; it warms up over the first 5 seconds and falls to zero after traffic stops. **Average speed** divides total image bytes received by active runtime, excluding pauses and manual recovery waits but including ordinary network waits, retry backoff and write-queue backpressure. Received bytes include failed/retried traffic and differ from bytes written to the ZIP. These are display improvements, not a throughput boost.
 - File extensions follow the real image format (JPEG becomes `.jpg`; PNG/WebP keep their extension — no transcoding).
 - If a download is running, reloading or closing the page triggers the browser's native confirmation.
-- Site-level errors (quota/GP exhausted, IP ban, suspended account, HTML error pages) stop the task immediately; transient per-image errors are retried and re-resolved.
+- Pause/resume aborts active network requests while preserving images already written to the ZIP. Resuming only fetches unfinished images.
+- Image requests with no new bytes for an extended period are aborted and retried. The downloader first retries the current URL, then re-resolves the image page and switches sources if failures persist.
+- After per-image retries are exhausted, or a site-level error occurs (quota/GP exhausted, IP ban, suspended account), the task is retained: retry unfinished pages, export completed images, or discard it. Partial ZIPs include a missing-page manifest.
+- Storage quota or ZIP write failures stop and clean up the task immediately instead of continuing to download unsavable data.
+- **Recovery works only within the current page**: reloading, closing the page or discarding the task loses its recovery state. Paused tasks and tasks awaiting recovery still trigger the native leave-page confirmation.
 - Without OPFS the downloader uses in-memory mode with a 512 MB limit and stops with a clear message instead of crashing the tab.
 
-**Metadata-only ZIP**: choose the title type, then click **Download Metadata ZIP**. The archive contains only `metadata.json` and `info.json`, downloads no images and needs no directory picker. The Chinese UI prefixes the name with `[仅元数据]`.
+Image ZIPs can include `metadata.json` and `info.json`. Standalone metadata-only ZIP export is no longer offered.
 
-### 5. Favorites, search and UI enhancements
+### 5. Translation highlighting and uncensored labels
 
-- **Quick favorites** on both detail and list pages; the default category (0–9) is configurable.
-- **Global search** adds a search field on list pages that jumps to the site's advanced search.
+- Favorites and search use the site's native controls; the script no longer overrides favorites or injects a global search bar.
 - **Translation highlighting** follows the UI language.
 - **Uncensored label** marks galleries carrying the real `uncensored` tag, next to the duplicate badge.
 
-### 6. Floating panels and userscript menu
+### 6. Floating panel
 
-- Two floating buttons: **tools** (settings and duplicate checking) and **download**.
-- Clicking toggles a panel; only one is visible at a time. Hold the panel title to drag it, and the position is remembered.
-- The userscript menu mirrors the same actions:
+- One small **EL launcher** starts in the top-right corner; the panel never expands automatically. Drag it with a mouse or touch to reposition it. Userscript storage remembers the location across refreshes and reopening, without folder permissions.
+- The panel follows the launcher, opens above it when space below is insufficient, and stays within the visible viewport after resizing. Settings includes an action to restore the default top-right position.
+- **Download / Check / Settings** share one compact panel. Clicking the launcher or close button collapses it without interrupting downloads.
+- Advanced and infrequent options use collapsible groups. On narrow screens, panel dimensions stay inside the viewport and overflow scrolls within the panel.
+- Local safe-preview screenshots show the actual userscript without any real gallery content.
+- No userscript extension menu commands are registered. Downloads, duplicate checks, maintenance tools and log exports are available through the top-right **EL panel**.
 
-| Menu command | Action |
-| --- | --- |
-| ⚙ Open LRR Settings | Opens the tool panel |
-| ⬇ Open Image ZIP Download | Opens the download panel |
-| 🔄 Rescan Current Page | Clears this page's related caches and re-checks |
-| 📂 Rescan LRR Archive Folder | Triggers a full LANraragi rescan |
-| 🧹 Clear LRR Cache | Clears all duplicate-check caches |
-| 🟢 Test LRR Connection | Checks server status and archive count |
+#### Exporting diagnostics
+
+Use **EL → Settings → Advanced → Export runtime logs**. This session's duplicate checks, index synchronization, downloads and errors are recorded automatically in memory. No extra switch is needed; Settings no longer exposes console logging or Debug toggles. Export after reproducing the issue, before refreshing or closing the page, and include your steps and expected/actual behavior.
+
+Only this script's events are collected, not other page scripts, browser or router system logs. Tabs and page sessions are not merged; refreshing starts a new log. The newest **10,000 entries / 5 MiB** are retained, whichever limit is reached first; oversized entries are also truncated. Dropped and truncated entry counts are included in the export. API keys and authentication data are automatically redacted, but gallery links, titles and internal server addresses may remain useful diagnostics. Review the file before sharing it.
 
 ### 7. Rescans and caches
 
@@ -221,7 +236,7 @@ Archive pages live at `server/reader?id=<archive id>`. A 404 usually means the *
 401/403 means the API key is wrong or unauthorised; 404 means the address or path prefix is wrong. If LANraragi has no password enabled, the key may be left empty.
 
 **Q: Won't this hammer the site or LANraragi?**
-Defaults are primary concurrency 8, fallback search concurrency 2 and download parallelism 2, with most results served from cache. Lower them if your network or server is slow; identical queries are merged.
+Defaults are primary concurrency 8, fallback search concurrency 2 and download parallelism 5 (existing saved settings are preserved), with most results served from cache. Lower them if your network or server is slow; identical queries are merged.
 
 **Q: Where is the API key stored?**
 In the userscript's own storage (`GM_setValue`), in plain text, and only used for the `Authorization` header. It never enters ZIP files, URLs or logs — but other scripts in the same browser profile could read it, so avoid configuring it on shared browsers.
@@ -245,6 +260,12 @@ The script stores the LANraragi address and API key in local browser storage. Ev
 ---
 
 ## Changelog
+
+### 1.3.7
+
+- Simplified: removed quick favorites, the injected global search bar, standalone metadata ZIP export and the separate source-check button. Downloads automatically validate/resolve image sources; image ZIP metadata remains available.
+- Retained: Chinese/English translation highlighting, uncensored labels, download pause/recovery/partial export, the persistent library index, draggable launcher and runtime log export.
+- Settings: separated LRR connection settings from collapsed low-frequency performance options; removed console logging/Debug toggles while keeping automatic diagnostics.
 
 ### 1.2.0
 
