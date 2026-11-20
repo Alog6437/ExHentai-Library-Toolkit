@@ -91,6 +91,19 @@ function installMocks(scriptVersion) {
     assert.ok(box.width <= 360, `panel too wide: ${box.width}`);
     assert.ok(box.height <= 600, `panel too tall: ${box.height}`);
     await shell.screenshot({ path: path.join(output, 'download-panel.png') });
+    const assertNoOverflow = async () => {
+      await page.waitForFunction(() => { const n = document.querySelector('#eh-toolkit-content'); return n.scrollHeight <= n.clientHeight + 1; });
+    };
+    await assertNoOverflow();
+    await page.setViewportSize({ width: 1440, height: 1400 });
+    await page.locator('#eh-gallerydl-panel details summary').click();
+    await page.waitForFunction(() => document.querySelector('#eh-toolkit-shell').getBoundingClientRect().height > 560);
+    await assertNoOverflow();
+    assert.equal(await page.locator('#eh-toolkit-content').evaluate(n => getComputedStyle(n).scrollbarWidth), 'none');
+    const expandedHeight = (await shell.boundingBox()).height;
+    await page.locator('#eh-gallerydl-panel details summary').click();
+    await page.waitForFunction(h => document.querySelector('#eh-toolkit-shell').getBoundingClientRect().height < h - 50, expandedHeight);
+    await page.setViewportSize({ width: 1440, height: 900 });
     await page.locator('[data-eh-tab="check"]').click();
     const syncButton = page.getByRole('button', { name: '立即同步', exact: true });
     assert.equal(await syncButton.count(), 1);
@@ -128,6 +141,8 @@ function installMocks(scriptVersion) {
     await page.waitForTimeout(1200); // Exercise a real periodic tick while paused.
     assert.equal(await averageSpeed.textContent(), pausedAverage, 'pause must freeze average speed');
     assert.equal(await page.locator('#eh-gdl-speed').textContent(), '0 B/s');
+    await assertNoOverflow();
+    assert.ok((await shell.boundingBox()).height > box.height, 'task controls should grow the panel naturally');
     await shell.screenshot({ path: path.join(output, 'paused-panel.png') });
     const savedPages = await page.locator('#eh-gdl-progress').textContent();
     await page.locator('#eh-toolkit-close').click();
@@ -156,6 +171,9 @@ function installMocks(scriptVersion) {
     await page.waitForFunction(() => { const r = document.querySelector('#eh-toolkit-shell').getBoundingClientRect(); return r.top >= 50 && r.bottom <= 360; });
     const shortBox = await shell.boundingBox();
     assert.ok(shortBox.y >= 50 && shortBox.y + shortBox.height <= 360, 'short viewport panel must fit below top-right launcher');
+    await shell.evaluate(n => { n.scrollTop = n.scrollHeight; });
+    assert.ok(await shell.evaluate(n => n.scrollTop > 0), 'short screens must still allow reaching bottom content');
+    assert.equal(await shell.evaluate(n => getComputedStyle(n).scrollbarWidth), 'none');
     await page.setViewportSize({ width: 390, height: 760 });
     // The watchdog must recreate removed UI, without creating duplicate launchers.
     await page.evaluate(() => document.querySelector('#eh-toolkit-shell').remove());
@@ -164,7 +182,7 @@ function installMocks(scriptVersion) {
     assert.deepEqual(await page.evaluate(() => window.__previewMenus), [], 'no extension menu commands should be registered');
     assert.equal(errors.length, 0, errors.join('\n'));
     assert.deepEqual(outbound, []);
-    fs.writeFileSync(path.join(output, 'verification.json'), JSON.stringify({ desktop: box, mobile: mobileBox, browserErrors: errors, externalNetworkRequests: outbound, checks: ['real userscript initialization', 'top-right launcher and downward panel', 'new configuration concurrency 5', 'short viewport containment', 'single launcher', 'three tabs', 'compact desktop panel', 'dark and light themes', 'masked API key', 'download pause abort', 'separate current and average speeds', 'pause freezes average across periodic tick', 'single-line sync label desktop and mobile', 'collapse preserves task', 'download resumes with saved progress', 'discard cleanup', 'mobile viewport containment', 'removed UI recovery'] }, null, 2));
+    fs.writeFileSync(path.join(output, 'verification.json'), JSON.stringify({ desktop: box, mobile: mobileBox, browserErrors: errors, externalNetworkRequests: outbound, checks: ['real userscript initialization', 'natural height grows beyond 560px and shrinks', 'task controls grow panel without normal-screen overflow', 'no visible scrollbar', 'short-screen scrolling reaches bottom', 'top-right launcher and downward panel', 'new configuration concurrency 5', 'short viewport containment', 'single launcher', 'three tabs', 'compact desktop panel', 'dark and light themes', 'masked API key', 'download pause abort', 'separate current and average speeds', 'pause freezes average across periodic tick', 'single-line sync label desktop and mobile', 'collapse preserves task', 'download resumes with saved progress', 'discard cleanup', 'mobile viewport containment', 'removed UI recovery'] }, null, 2));
     console.log('UI browser checks passed; screenshots:', output);
     await context.close();
   } finally { await browser.close(); }

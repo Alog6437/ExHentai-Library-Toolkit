@@ -55,6 +55,11 @@ const store = { enableQuickFav: false, enableGlobalSearch: false, enableChineseH
   }
   async function visibleBounds(page) {
     const viewport = page.viewportSize();
+    await page.waitForFunction(viewport => ['#eh-toolkit-launcher', '#eh-toolkit-shell'].every(selector => {
+      const n = document.querySelector(selector); if (!n || !n.getClientRects().length) return true;
+      const r = n.getBoundingClientRect();
+      return r.left >= -1 && r.top >= -1 && r.right <= viewport.width + 1 && r.bottom <= viewport.height + 1;
+    }), viewport);
     for (const selector of ['#eh-toolkit-launcher', '#eh-toolkit-shell']) {
       const node = page.locator(selector);
       if (!await node.isVisible()) continue;

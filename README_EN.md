@@ -1,6 +1,6 @@
 # ExHentai Library Toolkit
 
-**Current version: 1.3.11**
+**Current version: 1.3.12**
 
 All-in-one userscript for ExHentai / E-Hentai: **LANraragi duplicate checking**, browser-only original-image ZIP downloads with optional metadata, Chinese/English translation highlighting and uncensored labels.
 
@@ -54,7 +54,7 @@ Adult scripts can also be found on [Sleazy Fork](https://sleazyfork.org/). Those
 
 1. Download `ExHentai_Library_Toolkit.user.js` from this repository.
 2. Drag the file into a browser window, or use your manager's "Utilities → Import".
-3. Confirm the installed version is **1.3.11** (the panel footer shows the version too), then reload the page.
+3. Confirm the installed version is **1.3.12** (the panel footer shows the version too), then reload the page.
 
 ### Updating and removing
 
@@ -160,7 +160,7 @@ Image ZIPs can include `metadata.json` and `info.json`. Standalone metadata-only
 - One small **EL launcher** starts in the top-right corner; the panel never expands automatically. Drag it with a mouse or touch to reposition it. Userscript storage remembers the location across refreshes and reopening, without folder permissions.
 - The panel follows the launcher, opens above it when space below is insufficient, and stays within the visible viewport after resizing. Settings includes an action to restore the default top-right position.
 - **Download / Check / Settings** share one compact panel. Clicking the launcher or close button collapses it without interrupting downloads.
-- Advanced and infrequent options use collapsible groups. On narrow screens, panel dimensions stay inside the viewport and overflow scrolls within the panel.
+- Advanced and infrequent options use collapsible groups. The panel grows and shrinks naturally with content, without the previous 560px cap or a visible scrollbar. Scrolling is retained only when content exceeds the available viewport height, so bottom actions remain accessible on short screens.
 - Local safe-preview screenshots show the actual userscript without any real gallery content.
 - No userscript extension menu commands are registered. Downloads, duplicate checks, maintenance tools and log exports are available through the top-right **EL panel**.
 
@@ -263,6 +263,11 @@ The script stores the LANraragi address and API key in local browser storage. Ev
 ---
 
 ## Changelog
+
+### 1.3.12
+
+- The panel naturally resizes with task status, tabs and expanded options, without a fixed 560px cap or visible scrollbar.
+- Overflow remains scrollable only when necessary to fit the screen, preserving draggable positioning and short-screen accessibility.
 
 ### 1.3.11
 

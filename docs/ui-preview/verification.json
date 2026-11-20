@@ -15,6 +15,10 @@
   "externalNetworkRequests": [],
   "checks": [
     "real userscript initialization",
+    "natural height grows beyond 560px and shrinks",
+    "task controls grow panel without normal-screen overflow",
+    "no visible scrollbar",
+    "short-screen scrolling reaches bottom",
     "top-right launcher and downward panel",
     "new configuration concurrency 5",
     "short viewport containment",

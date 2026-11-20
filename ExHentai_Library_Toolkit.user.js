@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name        ExHentai Library Toolkit
 // @namespace   https://github.com/Alog6437/ExHentai-Library-Toolkit
-// @version     1.3.11
+// @version     1.3.12
 // @description  ExHentai/E-Hentai 一体化工具：LANraragi 查重、纯浏览器图片 ZIP 下载与元数据打包、翻译高亮、无修正标记及统一悬浮面板。
 // @description:en  ExHentai/E-Hentai toolkit with LANraragi duplicate checking, browser-only image ZIP downloads with metadata, translation highlighting, uncensored labels and a draggable compact panel.
 // @author      Alog6437
@@ -299,7 +299,7 @@
         config[name] = typeof CONFIG === 'object' ? CONFIG[name] : null;
       });
       config.hasAuthentication = !!(typeof CONFIG === 'object' && CONFIG.lrrApiKey);
-      return { version: typeof GM_info !== 'undefined' && GM_info.script ? String(GM_info.script.version || '1.3.11') : '1.3.11',
+      return { version: typeof GM_info !== 'undefined' && GM_info.script ? String(GM_info.script.version || '1.3.12') : '1.3.12',
         sessionStartedAt: runtimeLogState.startedAt, exportedAt: new Date().toISOString(),
         page: redactRuntimeString(typeof location !== 'undefined' ? location.href : ''),
         userAgent: sanitizeRuntimeValue(typeof navigator !== 'undefined' ? navigator.userAgent : ''),
@@ -3842,10 +3842,10 @@
   --eh-danger:#a23636; color-scheme:light;
 } }
 #eh-toolkit-shell {
-  position:fixed; top:60px; right:16px; bottom:auto; z-index:2147483646;
-  width:min(340px,calc(100vw - 32px)); max-height:min(560px,calc(100vh - 76px));
-  max-height:min(560px,calc(100dvh - 76px));
-  display:flex; flex-direction:column; overflow:hidden; border:1px solid var(--eh-border);
+  position:fixed; top:60px; right:16px; bottom:auto; z-index:2147483646; box-sizing:border-box;
+  width:min(340px,calc(100vw - 32px)); max-height:calc(100vh - 76px);
+  max-height:calc(100dvh - 76px);
+  display:flex; flex-direction:column; overflow-y:auto; overscroll-behavior:contain; scrollbar-width:none; border:1px solid var(--eh-border);
   border-radius:14px; background:var(--eh-bg); box-shadow:0 12px 44px #0005;
 }
 #eh-toolkit-shell *, #eh-toolkit-launcher { box-sizing:border-box; }
@@ -3859,7 +3859,8 @@
 .eh-toolkit-tabs { display:flex; gap:4px; padding:0 12px 8px; flex-shrink:0; border-bottom:1px solid var(--eh-border); }
 #eh-toolkit-shell .eh-toolkit-tabs button { flex:1; min-height:32px; border:0; border-radius:7px; color:var(--eh-muted); background:transparent; }
 #eh-toolkit-shell .eh-toolkit-tabs [aria-selected="true"] { color:var(--eh-accent); background:var(--eh-surface); font-weight:600; }
-#eh-toolkit-content { overflow-y:auto; overscroll-behavior:contain; scrollbar-width:thin; scrollbar-color:var(--eh-border) transparent; min-height:0; }
+#eh-toolkit-content { overflow:visible; flex-shrink:0; min-height:0; scrollbar-width:none; }
+#eh-toolkit-shell::-webkit-scrollbar, #eh-toolkit-content::-webkit-scrollbar { display:none; width:0; height:0; }
 #eh-toolbox-panel, #eh-gallerydl-panel { padding:14px 12px 12px; position:static; width:auto; background:transparent; }
 #eh-toolkit-shell .eh-view-heading { display:flex; align-items:center; justify-content:space-between; gap:8px; font-weight:600; margin-bottom:10px; }
 #eh-toolkit-shell .eh-view-heading em, #eh-toolkit-shell .eh-tb-version { color:var(--eh-muted); font-size:10px; font-weight:400; font-style:normal; }
@@ -3989,7 +3990,7 @@
       var panelX = Math.max(left + marginX, Math.min(x + 34 - panelWidth, left + width - marginX - panelWidth));
       var below = Math.max(0, top + height - marginY - (y + 44));
       var above = Math.max(0, y - 10 - top - marginY);
-      var desired = Math.max(1, Math.min(560, finite(panelHeight, 560)));
+      var desired = Math.max(1, finite(panelHeight, 560));
       var placement = below >= desired || below >= above ? 'below' : 'above';
       var available = placement === 'below' ? below : above;
       // In an extremely short viewport there is no usable space beside the button:
@@ -3997,7 +3998,7 @@
       if (available < 80) {
         available = Math.max(1, height - marginY * 2);
         return { x: x, y: y, panelX: panelX, panelY: top + marginY,
-          panelWidth: panelWidth, panelMaxHeight: Math.min(560, available), placement: 'overlap' };
+          panelWidth: panelWidth, panelMaxHeight: Math.min(desired, available), placement: 'overlap' };
       }
       var maxHeight = Math.min(desired, available);
       return { x: x, y: y, panelX: panelX,
@@ -4024,13 +4025,29 @@
       }
       if (shell) {
         shell.style.width = layout.panelWidth + 'px';
-        shell.style.maxHeight = '560px';
-        var naturalHeight = shell.style.display === 'none' ? 560 : shell.getBoundingClientRect().height;
-        layout = computeToolkitLayout(viewport, toolkitPosition, naturalHeight || 560);
+        // The shell is the sole scrolling container. Its non-shrinking content
+        // retains its intrinsic height even while the viewport limits the shell.
+        // Measure without temporarily removing maxHeight (which can trigger a
+        // ResizeObserver resize loop and jump the current scroll position).
+        var shellRect = shell.getBoundingClientRect();
+        var naturalHeight = shellRect.height;
+        if (Number.isFinite(shell.scrollHeight) && Number.isFinite(shell.clientHeight)) {
+          naturalHeight = Math.max(naturalHeight, shell.scrollHeight + shellRect.height - shell.clientHeight);
+        }
+        layout = computeToolkitLayout(viewport, toolkitPosition, Math.ceil(naturalHeight) || 560);
         shell.style.left = layout.panelX + 'px'; shell.style.top = layout.panelY + 'px';
         shell.style.right = 'auto'; shell.style.bottom = 'auto';
         shell.style.maxHeight = layout.panelMaxHeight + 'px';
       }
+    }
+
+    var toolkitLayoutPending = false;
+    function scheduleToolkitUiPosition() {
+      if (toolkitLayoutPending) return;
+      toolkitLayoutPending = true;
+      var update = function () { toolkitLayoutPending = false; positionToolkitUi(); };
+      if (typeof requestAnimationFrame === 'function') requestAnimationFrame(update);
+      else setTimeout(update, 0);
     }
 
     function persistToolkitPosition() {
@@ -4149,7 +4166,11 @@
       var shell = toolkitShell = container.firstElementChild;
       shell.setAttribute('data-theme', 'dark');
       document.body.appendChild(shell);
-      if (typeof ResizeObserver !== 'undefined') new ResizeObserver(function () { positionToolkitUi(); }).observe(shell);
+      if (typeof ResizeObserver !== 'undefined') new ResizeObserver(scheduleToolkitUiPosition).observe(shell);
+      if (typeof MutationObserver !== 'undefined') new MutationObserver(scheduleToolkitUiPosition).observe(shell, {
+        childList: true, characterData: true, subtree: true,
+        attributes: true, attributeFilter: ['open', 'hidden'],
+      });
       Promise.resolve(gmGet('ehToolkitTheme', 'dark')).then(function (theme) {
         shell.setAttribute('data-theme', ['auto', 'dark', 'light'].indexOf(theme) >= 0 ? theme : 'dark');
         var select = shell.querySelector('#eh-toolkit-theme');
