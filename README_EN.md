@@ -1,6 +1,6 @@
 # ExHentai Library Toolkit
 
-**Current version: 1.3.7**
+**Current version: 1.3.11**
 
 All-in-one userscript for ExHentai / E-Hentai: **LANraragi duplicate checking**, browser-only original-image ZIP downloads with optional metadata, Chinese/English translation highlighting and uncensored labels.
 
@@ -54,7 +54,7 @@ Adult scripts can also be found on [Sleazy Fork](https://sleazyfork.org/). Those
 
 1. Download `ExHentai_Library_Toolkit.user.js` from this repository.
 2. Drag the file into a browser window, or use your manager's "Utilities → Import".
-3. Confirm the installed version is **1.3.7** (the panel footer shows the version too), then reload the page.
+3. Confirm the installed version is **1.3.11** (the panel footer shows the version too), then reload the page.
 
 ### Updating and removing
 
@@ -128,14 +128,17 @@ Click the **EL launcher** in the top-right corner and select **Download**:
 1. **ZIP name**: original/Japanese title by default, or switch to the English/Chinese/Romaji title.
 2. **Download originals**, or uncheck it to use the displayed compressed/resized images.
 3. **Parallel tasks**: new configurations default to 5; existing saved settings are preserved, so select 5 manually after upgrading if desired. Lower this on weak connections or when throttled; more parallelism is not always faster.
-4. Click **Download Gallery**: gallery information and image sources are validated and resolved automatically, images are numbered `001.ext`, `002.ext`…, packed into a ZIP and handed to the browser. No separate source check is needed.
+4. Click **Download Gallery**: gallery information and image sources are validated and resolved automatically, images retain their original filenames and extensions without automatic numbering or `.jpeg` to `.jpg` normalization, packed into a ZIP and handed to the browser. No separate source check is needed.
 
 Behaviour notes:
 
 - Downloads and ZIP writes use a bounded pipeline: workers continue after queue admission instead of waiting for each disk write. ZIP writes remain serialized, and recovery/export waits for the queue to drain.
 - The write queue holds at most 10 images and normally up to 64 MiB, including the active write. A larger single image is admitted alone. Each network worker may additionally hold one image awaiting admission, so **64 MiB is not a total tab-memory limit**; the in-memory ZIP limit of 512 MB still applies. Runtime diagnostics include queue peaks, disk-write time and backpressure wait time. Actual throughput still depends on the image source and network.
 - **Current speed** is the combined image traffic over the last 5 seconds divided by 5 seconds, refreshed every second; it warms up over the first 5 seconds and falls to zero after traffic stops. **Average speed** divides total image bytes received by active runtime, excluding pauses and manual recovery waits but including ordinary network waits, retry backoff and write-queue backpressure. Received bytes include failed/retried traffic and differ from bytes written to the ZIP. These are display improvements, not a throughput boost.
-- File extensions follow the real image format (JPEG becomes `.jpg`; PNG/WebP keep their extension — no transcoding).
+- “Auto archive naming” is the default beside the original-image checkbox. It compares all authoritative response filenames in gallery page order using deterministic natural sorting. Strictly increasing, unambiguous names stay unchanged; otherwise every image gets a page prefix whose width matches the total page count, e.g. `01_original.JPEG` for 13 pages. Missing pages conservatively trigger uniform prefixes with gaps preserved. This reproduces the requested archive-style behavior, not undocumented official logic or every OS collation rule.
+- “Original names” and “Numbered names” remain available. Numbered mode uses `001.JPEG`, `002.png` etc. All modes retain extension spelling/case without compression or transcoding. Saving settings or starting a download remembers the choice. Existing saved preferences are not forcibly replaced; select auto to switch.
+- All images and metadata live directly at ZIP root without subdirectories. `metadata.json` includes ordered original-to-output `image_files` mappings and the `image_naming` mode (`auto_prefixed` records the auto decision). Auto mode finalizes names by patching local headers and central-directory names without buffering all images or adding HTTP requests; patch failures abort rather than export a corrupt ZIP. Original mode explicitly rejects duplicate filenames without overwriting or renaming; numbered mode separates duplicate basenames by page number and preserves missing-page gaps in partial exports.
+- Names come from the image response's `Content-Disposition`, the image-page filename or a real image URL. Resized images use the actual downloaded file's name/extension. Unknown or unsafe names and extension/response-format conflicts fail explicitly into the existing recovery flow rather than inventing names, changing extensions or silently sanitizing characters.
 - If a download is running, reloading or closing the page triggers the browser's native confirmation.
 - Pause/resume aborts active network requests while preserving images already written to the ZIP. Resuming only fetches unfinished images.
 - Image requests with no new bytes for an extended period are aborted and retried. The downloader first retries the current URL, then re-resolves the image page and switches sources if failures persist.
@@ -260,6 +263,27 @@ The script stores the LANraragi address and API key in local browser storage. Ev
 ---
 
 ## Changelog
+
+### 1.3.11
+
+- Default automatic archive naming keeps correctly ordered originals or uniformly prefixes page numbers using total-page digit width; partial exports preserve page gaps.
+- Original/numbered modes and saved preferences remain available. All files stay at ZIP root with unchanged extensions and image bytes.
+- In-place ZIP filename finalization avoids buffering the full gallery. Added naming, header-patch and real-browser ZIP checks.
+
+### 1.3.10
+
+- Added persisted original/numbered image naming beside the original-image checkbox, defaulting to original names.
+- Numbered mode follows page order while preserving extension case without transcoding. Both modes keep files at ZIP root and record original-to-output metadata mappings.
+
+### 1.3.9
+
+- Images and metadata now live directly at ZIP root without page subdirectories; original names and extensions remain unchanged.
+- Duplicate names fail explicitly without overwriting or renaming, with retry and partial export available.
+
+### 1.3.8
+
+- Image ZIPs retain original filenames and extensions without page-number renaming or `.jpeg` to `.jpg` normalization.
+- Separate page directories prevent duplicate-name collisions; metadata maps pages to original names and ZIP paths. Unknown or unsafe filenames fail explicitly without silent renaming.
 
 ### 1.3.7
 

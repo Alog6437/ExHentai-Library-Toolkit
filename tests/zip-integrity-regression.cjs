@@ -48,6 +48,7 @@ function unzipStored(bytes) {
     const local = b.readUInt32LE(p + 42);
     assert.equal(b.readUInt32LE(local), 0x04034b50);
     assert.equal(b.readUInt16LE(local + 6), 0x0808);
+    assert.equal(b.subarray(local + 30, local + 30 + b.readUInt16LE(local + 26)).toString('utf8'), name, 'local and central filenames must agree');
     const dataStart = local + 30 + b.readUInt16LE(local + 26) + b.readUInt16LE(local + 28);
     const data = b.subarray(dataStart, dataStart + size);
     assert.equal(crc(data), b.readUInt32LE(p + 16));
@@ -88,6 +89,59 @@ test('partial ZIP can be finalized with an explicit missing-page manifest', asyn
   const files = unzipStored(await (await zip.finish()).arrayBuffer());
   assert.deepEqual(JSON.parse(files.get('missing-pages.json')), { missing_pages: [2, 3] });
   assert.equal(files.has('002.jpg'), false);
+});
+
+test('deferred auto prefixes patch local headers and central names without moving or changing image data', async () => {
+  const c = loadZip(), sink = new c.MemoryZipSink(), zip = new c.StreamingZipWriter(sink);
+  const first = await zip.add('原图.JPEG', new Uint8Array([1, 2, 3]), 3);
+  const second = await zip.add('原图.JPEG', new Uint8Array([4, 5, 6]), 3);
+  const size = sink.size;
+  await zip.rename(first, '01_原图.JPEG'); await zip.rename(second, '02_原图.JPEG');
+  assert.equal(sink.size, size, 'only header bytes change; the image payload is never recopied');
+  await zip.add('metadata.json', new TextEncoder().encode('{}'));
+  const files = unzipStored(await (await zip.finish()).arrayBuffer());
+  assert.deepEqual([...files.keys()], ['01_原图.JPEG', '02_原图.JPEG', 'metadata.json']);
+  assert.deepEqual([...files.get('01_原图.JPEG')], [1, 2, 3]);
+  assert.deepEqual([...files.get('02_原图.JPEG')], [4, 5, 6]);
+});
+
+test('a rename cannot exceed reserved header space or corrupt image bytes', async () => {
+  const c = loadZip(), zip = new c.StreamingZipWriter(new c.MemoryZipSink());
+  const index = await zip.add('a.jpg', new Uint8Array([1, 2, 3]), 2);
+  await assert.rejects(zip.rename(index, 'much-too-long_a.jpg'), /reserved space/);
+  await assert.rejects(zip.rename(99, 'x.jpg'), /reserve/);
+  const files = unzipStored(await (await zip.finish()).arrayBuffer());
+  assert.deepEqual([...files.get('a.jpg')], [1, 2, 3]);
+});
+
+test('an ordered auto ZIP retains original names with valid unused local-header padding', async () => {
+  const c = loadZip(), zip = new c.StreamingZipWriter(new c.MemoryZipSink());
+  await zip.add('a.JPEG', new Uint8Array([1]), 3);
+  await zip.add('b.jpeg', new Uint8Array([2]), 3);
+  const files = unzipStored(await (await zip.finish()).arrayBuffer());
+  assert.deepEqual([...files.keys()], ['a.JPEG', 'b.jpeg']);
+});
+
+test('OPFS header patch restores append position before metadata and the central directory', async () => {
+  const c = loadZip(); let position = 0, bytes = new Uint8Array();
+  const writable = {
+    async write(command) {
+      let data = command;
+      if (command && command.type === 'write') { position = Number(command.position); data = command.data; }
+      const size = Math.max(bytes.length, position + data.length);
+      const next = new Uint8Array(size); next.set(bytes); next.set(data, position); bytes = next; position += data.length;
+    },
+    async seek(offset) { position = Number(offset); }, async close() {}, async abort() {},
+  };
+  const sink = new c.OpfsZipSink({ removeEntry: async () => {} }, { getFile: async () => new Blob([bytes]) }, writable, 'fake.zip');
+  const zip = new c.StreamingZipWriter(sink);
+  const a = await zip.add('same.png', new Uint8Array([1, 2]), 2);
+  const b = await zip.add('same.png', new Uint8Array([3, 4]), 2);
+  await zip.rename(a, '1_same.png'); await zip.rename(b, '2_same.png');
+  await zip.add('info.json', new Uint8Array([123, 125]));
+  const files = unzipStored(await (await zip.finish()).arrayBuffer());
+  assert.deepEqual([...files.keys()], ['1_same.png', '2_same.png', 'info.json']);
+  assert.deepEqual([...files.get('2_same.png')], [3, 4]);
 });
 
 test('memory ZIP quota rejects before retaining the overflowing chunk', async () => {

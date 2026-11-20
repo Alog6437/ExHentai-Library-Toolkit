@@ -4,7 +4,7 @@ const path = require('node:path');
 const vm = require('node:vm');
 const { test } = require('node:test');
 
-function harness({ failPages = [], fatalPage = 0, writeFail = false, parallel = 1, pageCount = 3, writeHook } = {}) {
+function harness({ failPages = [], fatalPage = 0, writeFail = false, parallel = 1, pageCount = 3, writeHook, renameHook, imageNames, imageNaming = 'original' } = {}) {
   const source = fs.readFileSync(path.join(__dirname, '../ExHentai_Library_Toolkit.user.js'), 'utf8');
   const failures = new Set(failPages), entries = [], calls = [], statuses = [], downloads = [];
   let aborted = 0, cleaned = 0, finished = 0;
@@ -16,18 +16,19 @@ function harness({ failPages = [], fatalPage = 0, writeFail = false, parallel = 
   }
   const panel = new Element(), status = new Element(), button = new Element();
   const ctx = vm.createContext({
-    recordRuntimeLog: () => {}, console, TextEncoder, Uint8Array, galleryDlBusy: false, zipSinkFallbackReason: '', MEMORY_ZIP_LIMIT: 536870912,
+    recordRuntimeLog: () => {}, console, URL, TextEncoder, Uint8Array, galleryDlBusy: false, zipSinkFallbackReason: '', MEMORY_ZIP_LIMIT: 536870912,
     GALLERY_DL_FAST_RETRIES: 3, GALLERY_DL_RECOVERY_ROUNDS: 3,
     document: { createElement: () => new Element() },
     t: zh => zh, warn() {}, getCurrentGalleryInfo: () => ({ gid: '1', url: 'https://gallery.test/g/1', page_count: pageCount }),
-    readGalleryDlPanelConfig: () => ({ galleryDlParallel: parallel, galleryDlOriginal: false, galleryDlWriteMetadata: true }),
+    readGalleryDlPanelConfig: () => ({ galleryDlParallel: parallel, galleryDlOriginal: false, galleryDlImageNaming: imageNaming, galleryDlWriteMetadata: true }),
     sanitizeGalleryTitle: x => x, chooseGalleryTitle: () => 'test-gallery',
     updateGalleryDlStatus: (...args) => statuses.push(args.slice(1)), updateGalleryDlMetrics() {}, updateGalleryDlPreview() {},
     setGalleryDownloadBusy: x => { ctx.galleryDlBusy = x; }, saveGalleryDlConfig: async () => {},
     fetchGalleryApiMetadata: async () => ({ filecount: pageCount }), collectImagePageUrls: async () => Array.from({ length: pageCount }, (_, i) => 'page' + (i + 1)),
     cleanupGalleryDlTempFiles: async () => {}, createZipSink: async () => ({}),
     StreamingZipWriter: class {
-      async add(name, data) { if (writeHook) await writeHook(name, data); if (writeFail && name.startsWith('002')) throw new Error('disk quota exceeded'); entries.push({ name, data }); }
+      async add(name, data) { if (writeHook) await writeHook(name, data); if (writeFail && name === '002.jpg') throw new Error('disk quota exceeded'); entries.push({ name, data }); return entries.length - 1; }
+      async rename(index, name) { if (renameHook) await renameHook(index, name); entries[index].name = name; }
       async finish() { finished++; return 'blob'; }
       async abort() { aborted++; }
       async cleanup() { cleaned++; }
@@ -39,20 +40,24 @@ function harness({ failPages = [], fatalPage = 0, writeFail = false, parallel = 
       }
       throw last;
     },
-    resolveDownloadImageUrl: async page => ({ url: page, pageUrl: page, nlToken: 'next' }),
+    resolveDownloadImageUrl: async page => ({ url: page, pageUrl: page, nlToken: 'next', original: true, originalFilename: imageNames ? imageNames[Number(page.slice(4)) - 1] : String(Number(page.slice(4))).padStart(3, '0') + '.jpg' }),
     galleryBinaryRequest: async (url, referer, progress, task) => {
       calls.push(url);
-      if (Number(url.slice(-1)) === fatalPage) { const e = new Error('IP blocked'); e.galleryFatal = true; e.galleryCode = 'ip-ban'; throw e; }
-      if (failures.has(Number(url.slice(-1)))) throw new Error('temporary image failure');
+      if (Number(url.replace('page', '')) === fatalPage) { const e = new Error('IP blocked'); e.galleryFatal = true; e.galleryCode = 'ip-ban'; throw e; }
+      if (failures.has(Number(url.replace('page', '')))) throw new Error('temporary image failure');
       if (task.stopped) throw task.error;
       progress({ loaded: 3 });
       return { data: new Uint8Array([Number(url.replace('page', '')), 2, 3]), finalUrl: url, contentType: 'image/jpeg' };
     },
-    imageExtension: () => '.jpg', galleryRetryDelay: () => 0, sleepMs: async () => {},
+    galleryRetryDelay: () => 0, sleepMs: async () => {},
     buildMetadata: () => ({}), buildEzeInfo: () => ({}), formatGalleryDlBytes: String,
     triggerZipDownload: (blob, name) => downloads.push(name), setTimeout: () => 1,
     setInterval: fn => { const id = ++intervalId; intervals.set(id, fn); return id; }, clearInterval: id => intervals.delete(id),
   });
+  const metadataStart = source.indexOf('    function buildMetadata(');
+  vm.runInContext(source.slice(metadataStart, source.indexOf('    function buildEzeInfo(', metadataStart)), ctx);
+  const nameStart = source.indexOf('    function parseGalleryDispositionFilename(');
+  vm.runInContext(source.slice(nameStart, source.indexOf('    function getCrc32Table(', nameStart)), ctx);
   const helperStart = source.indexOf('    function createGalleryDownloadTask(');
   vm.runInContext(source.slice(helperStart, source.indexOf('    function galleryRawRequest(', helperStart)), ctx);
   const start = source.indexOf('    async function startGalleryDlDownload(');
@@ -227,6 +232,106 @@ test('concurrent workers preserve successful entries across manual failed-page r
   assert.equal(h.calls.filter(x => x === 'page3').length, 1);
   assert.equal(new Set(h.entries.map(e => e.name)).size, h.entries.length);
   assert.deepEqual(h.downloads, ['test-gallery.zip']);
+});
+
+test('original Unicode names and JPEG extensions stay at ZIP root with truthful metadata and unchanged bytes', async () => {
+  const names = ['原图.JPEG', '第二张.JPEG', 'cover%20final.jpeg'];
+  const h = harness({ imageNames: names, parallel: 3 });
+  await h.run();
+  const expected = names;
+  const images = h.entries.filter(e => !e.name.endsWith('.json'));
+  assert.deepEqual(images.map(e => e.name).sort(), [...expected].sort());
+  for (const image of images) {
+    const page = names.indexOf(image.name) + 1;
+    assert.deepEqual(Array.from(image.data), [page, 2, 3]);
+  }
+  const metadata = JSON.parse(new TextDecoder().decode(h.entries.find(e => e.name === 'metadata.json').data));
+  assert.equal(metadata.filename_pattern, '{original_filename}');
+  assert.deepEqual(metadata.image_files, names.map((name, i) => ({ page: i + 1, path: expected[i], original_filename: name })));
+});
+
+test('auto mode decides globally from authoritative gallery-order names, not worker completion order', async () => {
+  for (const [names, expected, prefixed] of [
+    [['a.JPEG', 'b.JPEG', 'c.jpeg'], ['a.JPEG', 'b.JPEG', 'c.jpeg'], false],
+    [['z.JPEG', 'a.JPEG', 'b.jpeg'], ['1_z.JPEG', '2_a.JPEG', '3_b.jpeg'], true],
+    [['same.JPEG', 'same.JPEG', 'last.jpeg'], ['1_same.JPEG', '2_same.JPEG', '3_last.jpeg'], true],
+  ]) {
+    const h = harness({ imageNames: names, imageNaming: 'auto', parallel: 3 });
+    await h.run();
+    const images = h.entries.filter(e => !e.name.endsWith('.json'));
+    assert.deepEqual(images.map(e => e.name).sort(), [...expected].sort());
+    for (const image of images) assert.equal(image.data[0], expected.indexOf(image.name) + 1);
+    const metadata = JSON.parse(new TextDecoder().decode(h.entries.find(e => e.name === 'metadata.json').data));
+    assert.equal(metadata.image_naming, 'auto');
+    assert.equal(metadata.auto_prefixed, prefixed);
+    assert.deepEqual(metadata.image_files.map(e => e.path), expected);
+  }
+});
+
+test('partial auto export uses original total-page width and uniformly prefixes known successful pages', async () => {
+  const h = harness({ imageNaming: 'auto', pageCount: 13, imageNames: Array.from({ length: 13 }, (_, i) => 'original' + (i + 1) + '.JPEG'), failPages: [2] });
+  const running = h.run();
+  await until(() => h.buttons().some(b => b.textContent === '导出部分 ZIP'));
+  click(h, '导出部分 ZIP'); await running;
+  const images = h.entries.filter(e => !e.name.endsWith('.json'));
+  assert.equal(images.length, 12);
+  assert.ok(images.every(e => /^\d{2}_original/.test(e.name)));
+  assert.equal(images.some(e => e.name.startsWith('02_')), false);
+  assert.ok(images.some(e => e.name === '13_original13.JPEG'));
+});
+
+test('auto finalization patch failure aborts instead of exporting inconsistent filenames', async () => {
+  const h = harness({ imageNaming: 'auto', imageNames: ['z.jpg', 'a.jpg', 'b.jpg'], renameHook: async () => { throw new Error('patch disk failure'); } });
+  await h.run();
+  assert.equal(h.downloads.length, 0); assert.equal(h.aborted, 1); assert.equal(h.cleaned, 1);
+  assert.equal(h.ctx.galleryDlBusy, false);
+});
+
+test('numbered mode handles repeated original names without collisions and records original-to-output mapping', async () => {
+  const h = harness({ imageNames: ['same.JPEG', 'same.JPEG', 'last.jpeg'], imageNaming: 'sequential', parallel: 3 });
+  await h.run();
+  const images = h.entries.filter(e => !e.name.endsWith('.json'));
+  assert.deepEqual(images.map(e => e.name).sort(), ['001.JPEG', '002.JPEG', '003.jpeg']);
+  for (const image of images) assert.equal(image.data[0], parseInt(image.name, 10));
+  const metadata = JSON.parse(new TextDecoder().decode(h.entries.find(e => e.name === 'metadata.json').data));
+  assert.equal(metadata.image_naming, 'sequential');
+  assert.equal(metadata.filename_pattern, '{page:03d}{original_extension}');
+  assert.deepEqual(metadata.image_files.map(e => e.path), ['001.JPEG', '002.JPEG', '003.jpeg']);
+  assert.deepEqual(metadata.image_files.map(e => e.original_filename), ['same.JPEG', 'same.JPEG', 'last.jpeg']);
+});
+
+test('partial numbered mode preserves missing page gaps instead of renumbering successful pages', async () => {
+  const h = harness({ failPages: [2], imageNaming: 'sequential' });
+  const running = h.run();
+  await until(() => h.buttons().some(b => b.textContent === '导出部分 ZIP'));
+  click(h, '导出部分 ZIP'); await running;
+  assert.deepEqual(h.entries.filter(e => !e.name.endsWith('.json')).map(e => e.name), ['001.jpg', '003.jpg']);
+});
+
+test('duplicate original names never overwrite or invent paths, including case-insensitive collisions', async () => {
+  for (const duplicate of ['cover.JPEG', 'COVER.jpeg']) {
+    const h = harness({ imageNames: ['cover.JPEG', duplicate, 'last.jpeg'], parallel: 3 });
+    const running = h.run();
+    await until(() => h.buttons().some(b => b.textContent === '导出部分 ZIP'));
+    click(h, '导出部分 ZIP'); await running;
+    const images = h.entries.filter(e => !e.name.endsWith('.json'));
+    assert.equal(images.length, 2);
+    assert.ok(images.every(e => !e.name.includes('/')));
+    assert.equal(images.filter(e => e.name.toLowerCase() === 'cover.jpeg').length, 1);
+    const manifest = JSON.parse(new TextDecoder().decode(h.entries.find(e => e.name === 'missing-pages.json').data));
+    assert.equal(manifest.missing_pages.length, 1);
+    assert.match(manifest.missing_pages[0].error, /原文件名重复/);
+  }
+});
+
+test('unknown original filename remains a missing page rather than receiving an invented name', async () => {
+  const h = harness({ imageNames: ['cover.JPEG', null, 'last.jpeg'] });
+  const running = h.run();
+  await until(() => h.buttons().some(b => b.textContent === '导出部分 ZIP'));
+  click(h, '导出部分 ZIP'); await running;
+  assert.deepEqual(h.entries.filter(e => !e.name.endsWith('.json')).map(e => e.name), ['cover.JPEG', 'last.jpeg']);
+  const manifest = JSON.parse(new TextDecoder().decode(h.entries.find(e => e.name === 'missing-pages.json').data));
+  assert.equal(manifest.missing_pages[0].page, 2);
 });
 
 test('ZIP write failure stops scheduling images and never exports corrupted data', async () => {

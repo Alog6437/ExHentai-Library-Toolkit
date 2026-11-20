@@ -22,10 +22,11 @@ NODE_PATH=/tmp/elt-ui-preview-tools/node_modules node tools/test-lrr-index-brows
 NODE_PATH=/tmp/elt-ui-preview-tools/node_modules node tools/test-settings-browser.cjs
 NODE_PATH=/tmp/elt-ui-preview-tools/node_modules node tools/test-position-browser.cjs
 NODE_PATH=/tmp/elt-ui-preview-tools/node_modules node tools/test-simplified-browser.cjs
+NODE_PATH=/tmp/elt-ui-preview-tools/node_modules node tools/test-original-filename-browser.cjs
 node --check ExHentai_Library_Toolkit.user.js
 node --test tests/*.cjs
 ```
 
 从仓库根目录运行。脚本会覆盖本目录截图和 [浏览器验证记录](<verification.json>)。
 
-浏览器断言覆盖右上角入口与向下展开、新配置默认并发 5、短屏边界、单入口、标签切换、面板大小、深浅主题、API Key 掩码、暂停中止请求、收起保留任务、继续保留进度、放弃清理、窄屏边界、UI 被宿主页移除后的恢复，以及无浏览器异常、无外部网络请求。设置专项验收将 GM 存储留在浏览器页面之外，验证已存 Key 不回填 DOM、空输入保存保留、新 Key 替换、显式清除以及存储失败后原 Key 保留和临时输入清空。精简专项验收确保中文高亮、真实标签驱动的无修正标记和动态列表徽标仍生效，旧收藏／搜索配置不会接管原生控件，已移除的入口不存在，性能参数默认折叠且日志导出保留。真实站点登录、额度、封禁及油猴扩展差异不在此模拟验收范围内。
+浏览器断言覆盖右上角入口与向下展开、新配置默认并发 5、短屏边界、单入口、标签切换、面板大小、深浅主题、API Key 掩码、暂停中止请求、收起保留任务、继续保留进度、放弃清理、窄屏边界、UI 被宿主页移除后的恢复，以及无浏览器异常、无外部网络请求。设置专项验收将 GM 存储留在浏览器页面之外，验证已存 Key 不回填 DOM、空输入保存保留、新 Key 替换、显式清除以及存储失败后原 Key 保留和临时输入清空。精简专项验收确保中文高亮、真实标签驱动的无修正标记和动态列表徽标仍生效，旧收藏／搜索配置不会接管原生控件，已移除的入口不存在，性能参数默认折叠且日志导出保留。命名专项验收在自动／原名／序号三种模式下实际完成 ZIP 下载并独立读取 ZIP；自动模式覆盖有序原名保留、乱序全量加前缀，并分别验证 OPFS 与内存回写、本地头部与中央目录文件名一致。验证选择刷新后保留，核对中文原名、`.JPEG`／`.jpeg` 大小写、所有图片及元数据在 ZIP 根目录、图片页原名回退、元数据路径映射及图片字节未变。真实站点登录、额度、封禁及油猴扩展差异不在此模拟验收范围内。

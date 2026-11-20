@@ -214,7 +214,7 @@ test('gallery retries recover transient failures but stop immediately for site-w
 });
 
 test('image-page recovery extracts and reapplies the E-Hentai nl source token', () => {
-  const ctx = load('    function addGalleryQuery(', '    function imageExtension(', {
+  const ctx = load('    function addGalleryQuery(', '    function parseGalleryDispositionFilename(', {
     window: { location: { href: 'https://exhentai.org/g/1/token/' } },
     URL, t: (zh, en) => en,
   });

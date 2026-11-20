@@ -32,12 +32,13 @@ function installMocks(scriptVersion) {
       if (options.url.includes('/api.php')) {
         responseText = JSON.stringify({ gmetadata: [{ gid: 12345, token: 'preview', filecount: '24', title: 'Weekend Sketchbook — Volume 01', title_jpn: '周末速写集 Vol.01', tags: [] }] });
       } else if (options.url.includes('/s/')) {
-        responseText = '<img id="img" src="https://toolkit-preview.invalid/mock-image.jpg"><a href="/fullimg.php?gid=12345&page=1">Download original</a>';
+        const pageNumber = (options.url.match(/12345-(\d+)/) || [])[1] || '1';
+        responseText = '<img id="img" src="https://toolkit-preview.invalid/mock-image.jpg"><a href="/fullimg.php?gid=12345&page=' + pageNumber + '">Download original</a>';
       } else if (options.url.includes('/g/')) responseText = document.documentElement.outerHTML;
       else if (options.url.includes('/api/info')) responseText = JSON.stringify({ version: '0.9.30', total_archives: 128 });
       const response = image ? new Uint8Array([255, 216, 255, 217]).buffer : responseText;
       if (image && options.onprogress) options.onprogress({ loaded: response.byteLength, total: response.byteLength, lengthComputable: true });
-      options.onload({ status: 200, response, responseText, finalUrl: options.url, responseHeaders: image ? 'Content-Type: image/jpeg' : 'Content-Type: application/json' });
+      options.onload({ status: 200, response, responseText, finalUrl: options.url, responseHeaders: image ? 'Content-Type: image/jpeg\r\nContent-Disposition: attachment; filename="Preview original ' + new URL(options.url).searchParams.get('page') + '.JPEG"' : 'Content-Type: application/json' });
     }, image ? 450 : 30);
     return { abort() { if (aborted) return; aborted = true; clearTimeout(timer); if (image) window.__previewActive--; window.__previewAborts++; if (options.onabort) options.onabort(); } };
   };

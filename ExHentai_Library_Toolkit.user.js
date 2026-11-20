@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name        ExHentai Library Toolkit
 // @namespace   https://github.com/Alog6437/ExHentai-Library-Toolkit
-// @version     1.3.7
+// @version     1.3.11
 // @description  ExHentai/E-Hentai 一体化工具：LANraragi 查重、纯浏览器图片 ZIP 下载与元数据打包、翻译高亮、无修正标记及统一悬浮面板。
 // @description:en  ExHentai/E-Hentai toolkit with LANraragi duplicate checking, browser-only image ZIP downloads with metadata, translation highlighting, uncensored labels and a draggable compact panel.
 // @author      Alog6437
@@ -36,6 +36,7 @@
     // --- 纯浏览器图片下载 ---
     galleryDlTitleMode: 'japanese', // default=默认标题（英文/中文/罗马音），japanese=原文/日文标题
     galleryDlOriginal: true, // true=原画，false=页面显示的压缩/缩放图
+    galleryDlImageNaming: 'auto', // auto=必要时全库添加页码前缀，original=原文件名，sequential=序号重命名
     galleryDlWriteMetadata: true,
     galleryDlParallel: 5, // 任意正整数；实际工作线程不超过图库页数
 
@@ -121,9 +122,10 @@
         ['压缩包名称', 'ZIP Name'], ['默认标题（英文/中文/罗马音）', 'Default title (English/Chinese/Romaji)'],
         ['原文/日文标题（如果有）', 'Original/Japanese title (if available)'], ['ZIP 预览：', 'ZIP Preview: '],
         ['下载内容', 'Download Contents'], ['下载原画（取消后下载压缩/缩放图）', 'Download original images (uncheck for compressed/resized images)'],
-        ['图片按 001.ext、002.ext… 顺序命名', 'Name images sequentially as 001.ext, 002.ext…'],
+        ['自动：顺序正确保留原名，否则统一添加页码前缀', 'Auto: keep correctly ordered names; otherwise prefix every image with its page number'],
         ['打包 metadata.json + LRR兼容 info.json', 'Include metadata.json + LRR-compatible info.json'],
-        ['图片命名', 'Image Naming'], ['原文件是 JPEG 时就是 001.jpg；PNG/WebP 等会保留真实扩展名，避免转码导致不再是原画。', 'JPEG stays 001.jpg; PNG/WebP and other formats keep their real extensions so images are not transcoded.'],
+        ['原文件名', 'Original names'], ['序号重命名', 'Numbered names'],
+        ['自动归档排序（推荐）', 'Automatic archive order (recommended)'], ['图片命名', 'Image Naming'], ['原文件是 JPEG 时就是 001.jpg；PNG/WebP 等会保留真实扩展名，避免转码导致不再是原画。', 'JPEG stays 001.jpg; PNG/WebP and other formats keep their real extensions so images are not transcoded.'],
         ['下载性能', 'Download Performance'], ['并行任务', 'Parallel Tasks'],
         ['当前速度（近5秒）', 'Current (last 5s)'], ['网络接收（含重试）', 'Received (incl. retries)'],
         ['平均速度', 'Average Speed'], ['已写入 ZIP', 'Written to ZIP'], ['图片进度', 'Image Progress'],
@@ -155,6 +157,7 @@
     CONFIG.uiLanguage = CONFIG.uiLanguage === 'en' ? 'en' : 'zh';
     CONFIG.galleryDlTitleMode = CONFIG.galleryDlTitleMode === 'japanese' ? 'japanese' : 'default';
     CONFIG.galleryDlOriginal = CONFIG.galleryDlOriginal !== false;
+    CONFIG.galleryDlImageNaming = ['original', 'sequential'].indexOf(CONFIG.galleryDlImageNaming) >= 0 ? CONFIG.galleryDlImageNaming : 'auto';
     var galleryDlParallel = parseInt(CONFIG.galleryDlParallel, 10);
     CONFIG.galleryDlParallel = Math.max(1, isFinite(galleryDlParallel) ? galleryDlParallel : DEFAULT_CONFIG.galleryDlParallel);
   }
@@ -296,7 +299,7 @@
         config[name] = typeof CONFIG === 'object' ? CONFIG[name] : null;
       });
       config.hasAuthentication = !!(typeof CONFIG === 'object' && CONFIG.lrrApiKey);
-      return { version: typeof GM_info !== 'undefined' && GM_info.script ? String(GM_info.script.version || '1.3.7') : '1.3.7',
+      return { version: typeof GM_info !== 'undefined' && GM_info.script ? String(GM_info.script.version || '1.3.11') : '1.3.11',
         sessionStartedAt: runtimeLogState.startedAt, exportedAt: new Date().toISOString(),
         page: redactRuntimeString(typeof location !== 'undefined' ? location.href : ''),
         userAgent: sanitizeRuntimeValue(typeof navigator !== 'undefined' ? navigator.userAgent : ''),
@@ -840,6 +843,7 @@
       return {
         galleryDlTitleMode: modeNode ? modeNode.value : 'japanese',
         galleryDlOriginal: panel.querySelector('#cfg-galleryDlOriginal').checked,
+        galleryDlImageNaming: ['original', 'sequential'].indexOf(panel.querySelector('#cfg-galleryDlImageNaming').value) >= 0 ? panel.querySelector('#cfg-galleryDlImageNaming').value : 'auto',
         galleryDlWriteMetadata: panel.querySelector('#cfg-galleryDlWriteMetadata').checked,
         galleryDlParallel: Math.max(1, parseInt(panel.querySelector('#cfg-galleryDlParallel').value, 10) || 1),
       };
@@ -921,35 +925,148 @@
       var img = doc.querySelector('#img');
       var src = img && img.getAttribute('src');
       var nextNl = parseGalleryNlToken(res.text);
+      var originalFilename = null;
+      var nameNodes = doc.querySelectorAll('#i2 > div, #i4 > div');
+      for (var nameIndex = 0; nameIndex < nameNodes.length; nameIndex++) {
+        var nameMatch = String(nameNodes[nameIndex].textContent || '').match(/^([\s\S]+) :: \d+\s*x\s*\d+(?:\s*::|$)/i);
+        if (nameMatch) { originalFilename = nameMatch[1]; break; }
+      }
+      var displayedFilename = src ? galleryUrlFilename(new URL(src, requestedPageUrl).href) : null;
+      function resolvedImage(url, original) {
+        return { url: url, nlToken: nextNl, pageUrl: requestedPageUrl,
+          originalFilename: originalFilename, displayedFilename: displayedFilename, original: original };
+      }
 
       // Unchecked = use the image currently displayed on the image page (resized/compressed).
       if (!useOriginal) {
-        if (src) return { url: new URL(src, requestedPageUrl).href, nlToken: nextNl, pageUrl: requestedPageUrl };
+        if (src) return resolvedImage(new URL(src, requestedPageUrl).href, false);
         throw new Error(t('图片页没有可下载的压缩/缩放图', 'No compressed/resized image was found on the image page'));
       }
 
       var original = doc.querySelector('a[href*="/fullimg.php"], a[href*="/fullimg/"]');
       if (original && original.getAttribute('href')) {
         var originalUrl = new URL(original.getAttribute('href'), requestedPageUrl).href;
-        return { url: addGalleryQuery(originalUrl, 'nl', nextNl), nlToken: nextNl, pageUrl: requestedPageUrl };
+        return resolvedImage(addGalleryQuery(originalUrl, 'nl', nextNl), true);
       }
       if (src) {
         var absolute = new URL(src, requestedPageUrl).href;
-        if (/xres=org(?:[;&/]|$)/i.test(absolute)) return { url: absolute, nlToken: nextNl, pageUrl: requestedPageUrl };
+        if (/xres=org(?:[;&/]|$)/i.test(absolute)) return resolvedImage(absolute, true);
       }
       throw new Error(t('图片页没有可确认的原画链接', 'No confirmed original-image URL was found on the image page'));
     }
 
-    function imageExtension(finalUrl, contentType, headers) {
-      var disposition = String(headers || '').match(/filename\*?=(?:UTF-8''|["']?)([^"'\r\n;]+)/i);
-      var name = disposition ? decodeURIComponent(disposition[1].replace(/["']/g, '').trim()) : '';
-      var urlName = '';
-      try { urlName = new URL(finalUrl).pathname.split('/').pop() || ''; } catch (e) {}
-      var candidate = name || urlName;
-      var m = candidate.match(/\.(jpe?g|png|webp|gif|bmp|avif|jxl)(?:$|\?)/i);
-      if (m) return '.' + (m[1].toLowerCase() === 'jpeg' ? 'jpg' : m[1].toLowerCase());
-      var types = { 'image/jpeg': '.jpg', 'image/jpg': '.jpg', 'image/png': '.png', 'image/webp': '.webp', 'image/gif': '.gif', 'image/bmp': '.bmp', 'image/avif': '.avif', 'image/jxl': '.jxl' };
-      return types[contentType] || '.jpg';
+    function parseGalleryDispositionFilename(headers) {
+      var line = String(headers || '').match(/^content-disposition\s*:\s*([^\r\n]*)/im);
+      if (!line) return null;
+      var parameters = /;\s*(filename\*|filename)\s*=\s*(?:"((?:[^"\\]|\\.)*)"|([^;]*))/gi;
+      var match, extended = null, legacy = null;
+      while ((match = parameters.exec(line[1]))) {
+        var value = match[2] !== undefined ? match[2].replace(/\\(["\\])/g, '$1') : match[3].trim();
+        if (match[1].toLowerCase() === 'filename*') {
+          var encoded = value.match(/^UTF-8'[^']*'([\s\S]*)$/i);
+          if (encoded) { try { extended = decodeURIComponent(encoded[1]); } catch (_) {} }
+        } else {
+          // RFC 6266 legacy filenames are literal; decoding percent escapes
+          // would silently rename a file whose actual name contains "%20".
+          legacy = value;
+        }
+      }
+      return extended || legacy || null;
+    }
+
+    function validateGalleryImageFilename(name) {
+      if (typeof name !== 'string' || !name || name === '.' || name === '..' ||
+          /[\/\\<>:"|?*\x00-\x1f\x7f-\x9f]/.test(name) || /[. ]$/.test(name) ||
+          /^(?:con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)/i.test(name)) {
+        throw new Error(t('原文件名不安全或无法确认，未改名且未写入 ZIP', 'Original filename is unsafe or unavailable; it was not renamed or written to ZIP'));
+      }
+      return name;
+    }
+
+    function galleryImageFilenameFormat(name) {
+      var extension = String(name || '').match(/\.(jpe?g|png|webp|gif|bmp|avif|jxl|tiff?|heic|heif)$/i);
+      if (!extension) return null;
+      var value = extension[1].toLowerCase();
+      return value === 'jpg' ? 'jpeg' : value === 'tif' ? 'tiff' : value;
+    }
+
+    function galleryUrlFilename(url) {
+      try {
+        var parsed = new URL(url);
+        if (!/^https?:$/.test(parsed.protocol)) return null;
+        var name = decodeURIComponent(parsed.pathname.split('/').pop() || '');
+        return galleryImageFilenameFormat(name) ? validateGalleryImageFilename(name) : null;
+      } catch (error) {
+        if (error && /Original filename|原文件名/.test(error.message)) throw error;
+        return null;
+      }
+    }
+
+    function chooseGalleryImageFilename(resolved, result) {
+      var headerName = parseGalleryDispositionFilename(result.headers);
+      var name;
+      if (headerName) {
+        // A lower-priority URL must never override or invalidate a valid header.
+        name = validateGalleryImageFilename(headerName);
+      } else {
+        var pageName = resolved.originalFilename ? validateGalleryImageFilename(resolved.originalFilename) : null;
+        var finalName = galleryUrlFilename(result.finalUrl);
+        var finalFormat = galleryImageFilenameFormat(finalName);
+        if (!resolved.original && resolved.displayedFilename &&
+            galleryImageFilenameFormat(pageName) !== galleryImageFilenameFormat(resolved.displayedFilename)) pageName = validateGalleryImageFilename(resolved.displayedFilename);
+        if (pageName && finalFormat && galleryImageFilenameFormat(pageName) !== finalFormat) pageName = finalName;
+        name = validateGalleryImageFilename(pageName || finalName);
+      }
+      var format = galleryImageFilenameFormat(name);
+      var mime = String(result.contentType || '').split(';')[0].toLowerCase().trim();
+      var knownMime = { 'image/jpeg': 'jpeg', 'image/jpg': 'jpeg', 'image/png': 'png', 'image/webp': 'webp',
+        'image/gif': 'gif', 'image/bmp': 'bmp', 'image/avif': 'avif', 'image/jxl': 'jxl', 'image/tiff': 'tiff',
+        'image/heic': 'heic', 'image/heif': 'heif' };
+      // MIME is only a consistency check, never a source of a fabricated filename.
+      if (!format || (knownMime[mime] && format !== knownMime[mime])) {
+        throw new Error(t('原文件名扩展名与图片格式不符或无法确认，未自动改名', 'Original filename extension conflicts with the image format or is unconfirmed; no automatic rename was performed'));
+      }
+      return name;
+    }
+
+    function createGalleryImagePath(index, name, namingMode, totalPages) {
+      if (!Number.isInteger(index) || index < 0) throw new Error('Invalid image page index');
+      name = validateGalleryImageFilename(name);
+      if (namingMode !== 'sequential') return name;
+      var extension = name.match(/\.[^.]+$/);
+      if (!extension || !galleryImageFilenameFormat(name)) throw new Error('Unconfirmed image extension');
+      var digits = Math.max(3, String(totalPages || index + 1).length);
+      return String(index + 1).padStart(digits, '0') + extension[0];
+    }
+
+    function compareGalleryNaturalNames(a, b) {
+      var left = String(a).toLowerCase().match(/\d+|\D+/g) || [];
+      var right = String(b).toLowerCase().match(/\d+|\D+/g) || [];
+      for (var i = 0; i < Math.min(left.length, right.length); i++) {
+        var x = left[i], y = right[i];
+        if (/^\d+$/.test(x) && /^\d+$/.test(y)) {
+          x = x.replace(/^0+/, '') || '0'; y = y.replace(/^0+/, '') || '0';
+          if (x.length !== y.length) return x.length < y.length ? -1 : 1;
+        }
+        if (x !== y) return x < y ? -1 : 1;
+      }
+      return left.length === right.length ? 0 : left.length < right.length ? -1 : 1;
+    }
+
+    function planGalleryImageNames(names, totalPages) {
+      var prefixed = names.length !== totalPages;
+      var previous = null;
+      for (var i = 0; i < totalPages; i++) {
+        var name = names[i];
+        if (!name) { prefixed = true; continue; }
+        validateGalleryImageFilename(name);
+        if (previous !== null && compareGalleryNaturalNames(previous, name) >= 0) prefixed = true;
+        previous = name;
+      }
+      var digits = String(totalPages).length;
+      return { prefixed: prefixed, paths: names.map(function (name, index) {
+        return name ? (prefixed ? String(index + 1).padStart(digits, '0') + '_' : '') + name : null;
+      }) };
     }
 
     function getCrc32Table() {
@@ -1008,6 +1125,20 @@
       this.parts.push(bytes);
       return Promise.resolve();
     };
+    MemoryZipSink.prototype.patch = function (offset, bytes) {
+      if (!Number.isSafeInteger(offset) || offset < 0 || offset + bytes.length > this.size) return Promise.reject(new Error('ZIP patch is out of bounds'));
+      var cursor = 0, copied = 0;
+      for (var i = 0; i < this.parts.length && copied < bytes.length; i++) {
+        var part = this.parts[i];
+        if (cursor + part.length > offset) {
+          var start = Math.max(0, offset - cursor);
+          var count = Math.min(part.length - start, bytes.length - copied);
+          part.set(bytes.subarray(copied, copied + count), start); copied += count; offset += count;
+        }
+        cursor += part.length;
+      }
+      return Promise.resolve();
+    };
     MemoryZipSink.prototype.finish = function () {
       var blob = new Blob(this.parts, { type: 'application/zip' });
       // Blob 已经在构造时快照字节，这里立刻释放分片，避免下载完成后整库仍占内存。
@@ -1027,6 +1158,10 @@
       return new OpfsZipSink(root, handle, writable, name);
     };
     OpfsZipSink.prototype.write = function (bytes) { return this.writable.write(bytes); };
+    OpfsZipSink.prototype.patch = async function (offset, bytes, endOffset) {
+      await this.writable.write({ type: 'write', position: offset, data: bytes });
+      await this.writable.seek(endOffset);
+    };
     OpfsZipSink.prototype.finish = async function () { await this.writable.close(); this.writable = null; return this.handle.getFile(); };
     async function removeOpfsEntryWithRetry(root, name) {
       for (var attempt = 0; attempt < 5; attempt++) {
@@ -1096,14 +1231,17 @@
       this.offset += BigInt(bytes.byteLength || bytes.length || 0);
     };
 
-    StreamingZipWriter.prototype.add = async function (name, arrayBuffer) {
+    StreamingZipWriter.prototype.add = async function (name, arrayBuffer, reservePrefixBytes) {
       var data = arrayBuffer instanceof Uint8Array ? arrayBuffer : new Uint8Array(arrayBuffer);
       if (data.byteLength > ZIP32_MAX) throw new Error('单个文件超过 4GB，当前纯浏览器 ZIP 不支持');
       var nameBytes = this.encoder.encode(name);
       var stamp = dosDateTime(new Date());
       var crc = crc32(data);
       var localOffset = this.offset;
-      var header = new Uint8Array(30 + nameBytes.length);
+      var reserve = Math.max(0, Number(reservePrefixBytes) || 0);
+      var extraLength = reserve ? reserve + 4 : 0;
+      if (nameBytes.length > 65535 || extraLength > 65535) throw new Error('ZIP filename or extra field is too long');
+      var header = new Uint8Array(30 + nameBytes.length + extraLength);
       var view = new DataView(header.buffer);
       view.setUint32(0, 0x04034b50, true);
       view.setUint16(4, 20, true);
@@ -1115,8 +1253,9 @@
       view.setUint32(18, 0, true);
       view.setUint32(22, 0, true);
       view.setUint16(26, nameBytes.length, true);
-      view.setUint16(28, 0, true);
+      view.setUint16(28, extraLength, true);
       header.set(nameBytes, 30);
+      if (extraLength) { view.setUint16(30 + nameBytes.length, 0xffff, true); view.setUint16(32 + nameBytes.length, reserve, true); }
       await this.write(header);
       await this.write(data);
       var desc = new Uint8Array(16);
@@ -1126,7 +1265,24 @@
       dv.setUint32(8, data.byteLength, true);
       dv.setUint32(12, data.byteLength, true);
       await this.write(desc);
-      this.entries.push({ nameBytes: nameBytes, crc: crc, size: data.byteLength, offset: localOffset, time: stamp.time, date: stamp.date });
+      this.entries.push({ header: reserve ? header : null, nameBytes: nameBytes, crc: crc, size: data.byteLength, offset: localOffset, time: stamp.time, date: stamp.date });
+      return this.entries.length - 1;
+    };
+
+    StreamingZipWriter.prototype.rename = async function (index, name) {
+      var entry = this.entries[index];
+      if (!entry || !entry.header) throw new Error("ZIP entry has no rename reserve");
+      var nameBytes = this.encoder.encode(name);
+      var remaining = entry.header.length - 30 - nameBytes.length;
+      if (nameBytes.length > 65535 || remaining < 4 || remaining > 65535) throw new Error("ZIP rename exceeds reserved space");
+      var header = entry.header.slice();
+      header.fill(0, 30); header.set(nameBytes, 30);
+      var view = new DataView(header.buffer);
+      view.setUint16(26, nameBytes.length, true); view.setUint16(28, remaining, true);
+      view.setUint16(30 + nameBytes.length, 0xffff, true); view.setUint16(32 + nameBytes.length, remaining - 4, true);
+      if (entry.offset > BigInt(Number.MAX_SAFE_INTEGER) || this.offset > BigInt(Number.MAX_SAFE_INTEGER)) throw new Error("ZIP patch offset exceeds safe integer range");
+      await this.sink.patch(Number(entry.offset), header, Number(this.offset));
+      entry.header = header; entry.nameBytes = nameBytes;
     };
 
     StreamingZipWriter.prototype.centralRecord = function (entry) {
@@ -1208,7 +1364,7 @@
     StreamingZipWriter.prototype.abort = function () { return this.sink.abort(); };
     StreamingZipWriter.prototype.cleanup = function () { return this.sink.cleanup(); };
 
-    function buildMetadata(info, apiMeta, selectedTitle, downloadedFiles, originalOnly) {
+    function buildMetadata(info, apiMeta, selectedTitle, downloadedFiles, originalOnly, imageFiles) {
       var meta = Object.assign({}, apiMeta || {});
       meta.source = 'E-Hentai/ExHentai';
       meta.gallery_url = info.url;
@@ -1220,7 +1376,8 @@
       meta.filecount = String((apiMeta && apiMeta.filecount) || info.page_count || downloadedFiles || 0);
       meta.tags = (apiMeta && Array.isArray(apiMeta.tags) && apiMeta.tags.length) ? apiMeta.tags : info.tags;
       meta.downloaded_files = downloadedFiles;
-      meta.filename_pattern = '001.ext';
+      meta.filename_pattern = '{original_filename}';
+      meta.image_files = Array.isArray(imageFiles) ? imageFiles : [];
       meta.original_only = !!originalOnly;
       meta.image_quality = originalOnly ? 'original' : 'resized';
       meta.downloaded_at = new Date().toISOString();
@@ -1278,7 +1435,7 @@
       var cfg = readGalleryDlPanelConfig(panel);
       var selectedTitle = sanitizeGalleryTitle(chooseGalleryTitle(info, cfg.galleryDlTitleMode));
       var zipName = selectedTitle + '.zip';
-      recordRuntimeLog('info', 'download.started', { gallery: info.url, pages: info.page_count, originalOnly: cfg.galleryDlOriginal, concurrency: cfg.galleryDlParallel });
+      recordRuntimeLog('info', 'download.started', { gallery: info.url, pages: info.page_count, originalOnly: cfg.galleryDlOriginal, imageNaming: cfg.galleryDlImageNaming, concurrency: cfg.galleryDlParallel });
       var tempName = '.eh-pure-' + info.gid + '-' + Date.now() + '.zip';
       var zip = null;
       var writeQueue = null;
@@ -1377,6 +1534,7 @@
         speedMeter = createGallerySpeedMeter();
         if (task.paused) speedMeter.suspend('pause');
         var downloadStates = imagePages.map(function () { return { nlToken: '', lastError: null, saved: false, resolved: null }; });
+        var imagePathOwners = new Map();
         var currentQueue = imagePages.map(function (_, index) { return index; });
         var queueCursor = 0;
         var roundFailures = [];
@@ -1386,6 +1544,11 @@
         async function enqueueImage(index, filename, binary) {
           var state = downloadStates[index];
           if (state.saved || state.queued) return;
+          var pathKey = filename.toLowerCase();
+          if (cfg.galleryDlImageNaming !== 'auto' && imagePathOwners.has(pathKey) && imagePathOwners.get(pathKey) !== index) {
+            throw new Error(t('图片原文件名重复，未覆盖或改名：', 'Duplicate original image filename; no overwrite or rename: ') + filename);
+          }
+          imagePathOwners.set(pathKey, index);
           state.queued = true;
           var data = binary.data;
           var byteLength = data.byteLength;
@@ -1394,8 +1557,9 @@
             await writeQueue.enqueue(byteLength, async function () {
               try {
                 if (state.saved) return;
-                await zip.add(filename, data);
+                state.entryIndex = await zip.add(filename, data, cfg.galleryDlImageNaming === 'auto' ? String(totalPages).length + 1 : 0);
                 state.saved = true;
+                state.path = filename;
                 stats.savedBytes += byteLength;
                 stats.done++;
                 refreshMetrics('downloading');
@@ -1464,9 +1628,9 @@
                 refreshMetrics('downloading');
                 return result;
               }, 2, recoveryRound);
-              var ext = imageExtension(bin.finalUrl, bin.contentType, bin.headers);
-              var digits = Math.max(3, String(totalPages).length);
-              var filename = String(pageNo).padStart(digits, '0') + ext;
+              var originalFilename = chooseGalleryImageFilename(resolved, bin);
+              var filename = createGalleryImagePath(index, originalFilename, cfg.galleryDlImageNaming, totalPages);
+              state.originalFilename = originalFilename;
               await enqueueImage(index, filename, bin);
               bin = null;
             } catch (e) {
@@ -1525,6 +1689,22 @@
         await galleryTaskCheckpoint(task);
         pauseButton.disabled = true;
         cancelButton.disabled = true;
+        var autoPlan = null;
+        if (cfg.galleryDlImageNaming === 'auto') {
+          autoPlan = planGalleryImageNames(downloadStates.map(function (state) { return state.saved ? state.originalFilename : null; }), totalPages);
+          recordRuntimeLog('info', 'download.auto-naming', { prefixed: autoPlan.prefixed, totalPages: totalPages, savedPages: stats.done });
+          try {
+            for (var renameIndex = 0; renameIndex < downloadStates.length; renameIndex++) {
+              var renameState = downloadStates[renameIndex];
+              if (!renameState.saved) continue;
+              await galleryTaskCheckpoint(task);
+              if (autoPlan.paths[renameIndex] !== renameState.path) await zip.rename(renameState.entryIndex, autoPlan.paths[renameIndex]);
+              renameState.path = autoPlan.paths[renameIndex];
+            }
+          } catch (patchError) {
+            patchError.galleryFatal = true; patchError.galleryCode = 'zip-write-failed'; task.stop(patchError); throw patchError;
+          }
+        }
         if (partialExport) {
           var manifest = {
             gallery_url: info.url, total_pages: totalPages, downloaded_pages: stats.done,
@@ -1537,7 +1717,11 @@
           zipName = selectedTitle + '.partial.zip';
         }
 
-        var metadata = buildMetadata(info, apiMeta, selectedTitle, stats.done, cfg.galleryDlOriginal);
+        var metadata = buildMetadata(info, apiMeta, selectedTitle, stats.done, cfg.galleryDlOriginal,
+          downloadStates.map(function (state, index) { return state.saved ? { page: index + 1, path: state.path, original_filename: state.originalFilename } : null; }).filter(function (entry) { return !!entry; }));
+        metadata.image_naming = cfg.galleryDlImageNaming;
+        metadata.auto_prefixed = !!(autoPlan && autoPlan.prefixed);
+        metadata.filename_pattern = metadata.auto_prefixed ? '{page:0' + String(totalPages).length + 'd}_{original_filename}' : metadata.image_naming === 'sequential' ? '{page:0' + Math.max(3, String(totalPages).length) + 'd}{original_extension}' : '{original_filename}';
         if (cfg.galleryDlWriteMetadata) {
           await zip.add('metadata.json', new TextEncoder().encode(JSON.stringify(metadata, null, 2)));
           await zip.add('info.json', new TextEncoder().encode(JSON.stringify(buildEzeInfo(info, apiMeta), null, 2)));
@@ -3613,7 +3797,7 @@
   <div id="eh-gallerydl-body">
     <div class="eh-view-heading">图片 ZIP 下载 <em id="eh-gdl-page-preview"></em></div>
     <div class="eh-gdl-preview"><span>ZIP</span><strong id="eh-gdl-title-preview">-</strong></div>
-    <div class="eh-download-options"><label class="eh-check"><input type="checkbox" id="cfg-galleryDlOriginal"> 原画</label><label class="eh-inline-field"><span>并行任务</span><input type="number" id="cfg-galleryDlParallel" min="1" step="1" value="5"></label></div>
+    <div class="eh-download-options"><label class="eh-check"><input type="checkbox" id="cfg-galleryDlOriginal"> 原画</label><select id="cfg-galleryDlImageNaming" aria-label="图片命名" title="图片命名"><option value="auto">自动归档排序（推荐）</option><option value="original">原文件名</option><option value="sequential">序号重命名</option></select><label class="eh-inline-field"><span>并行任务</span><input type="number" id="cfg-galleryDlParallel" min="1" step="1" value="5"></label></div>
     <div id="eh-gdl-status" class="eh-tb-lrr-status checking">
       <div class="eh-tb-status-main">就绪</div>
       <div class="eh-tb-status-detail">选择画质后开始</div>
@@ -3631,7 +3815,7 @@
       <label class="eh-check"><input type="radio" name="cfg-galleryDlTitleMode" value="default"> 默认标题（英文/中文/罗马音）</label>
       <label class="eh-check"><input type="radio" name="cfg-galleryDlTitleMode" value="japanese"> 原文/日文标题（如果有）</label>
       <label class="eh-check"><input type="checkbox" id="cfg-galleryDlWriteMetadata"> 打包 metadata.json + LRR兼容 info.json</label>
-      <p class="eh-gdl-hint">001.ext · 002.ext · 003.ext · 保留原始格式</p>
+      <p class="eh-gdl-hint">自动：顺序正确保留原名，否则统一添加页码前缀</p>
       <div class="eh-tb-actions"><button id="eh-gdl-save" class="eh-tb-btn">保存下载设置</button></div>
     </details>
     <p class="eh-gdl-hint eh-session-note">暂停可继续 · 刷新无法恢复 · <span class="eh-tb-version"></span></p>
@@ -3708,7 +3892,10 @@
 #eh-toolkit-shell .eh-gdl-preview { display:flex; align-items:baseline; gap:8px; padding:10px; background:var(--eh-surface); border-radius:8px; margin-bottom:10px; }
 #eh-toolkit-shell .eh-gdl-preview > span { font-size:10px; color:var(--eh-muted); }
 #eh-toolkit-shell .eh-gdl-preview strong { font-size:11px; font-weight:500; overflow-wrap:anywhere; display:-webkit-box; -webkit-line-clamp:2; -webkit-box-orient:vertical; overflow:hidden; }
-#eh-toolkit-shell .eh-download-options { display:flex; align-items:center; justify-content:space-between; gap:8px; margin-bottom:10px; }
+#eh-toolkit-shell .eh-download-options { display:flex; flex-wrap:wrap; align-items:center; justify-content:space-between; gap:8px; margin-bottom:10px; }
+#eh-toolkit-shell #cfg-galleryDlImageNaming { width:110px !important; min-width:0; font-size:11px; }
+#eh-toolkit-shell .eh-download-options .eh-inline-field { gap:4px; }
+#eh-toolkit-shell .eh-download-options .eh-inline-field input { width:44px !important; }
 #eh-toolkit-shell .eh-inline-field { display:flex; align-items:center; gap:8px; color:var(--eh-muted); }
 #eh-toolkit-shell .eh-inline-field input { width:58px !important; }
 #eh-toolkit-shell .eh-tb-lrr-status { padding:10px; border:1px solid var(--eh-border); border-radius:8px; background:var(--eh-surface); }
@@ -4053,6 +4240,7 @@
       panel.style.display = 'block';
 
       panel.querySelector('#cfg-galleryDlOriginal').checked = CONFIG.galleryDlOriginal !== false;
+      panel.querySelector('#cfg-galleryDlImageNaming').value = ['original', 'sequential'].indexOf(CONFIG.galleryDlImageNaming) >= 0 ? CONFIG.galleryDlImageNaming : 'auto';
       panel.querySelector('#cfg-galleryDlWriteMetadata').checked = !!CONFIG.galleryDlWriteMetadata;
       panel.querySelector('#cfg-galleryDlParallel').value = String(CONFIG.galleryDlParallel);
       var modeNode = panel.querySelector('input[name="cfg-galleryDlTitleMode"][value="' + CONFIG.galleryDlTitleMode + '"]');
