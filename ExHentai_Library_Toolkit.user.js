@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name        ExHentai Library Toolkit
 // @namespace   https://github.com/Alog6437/ExHentai-Library-Toolkit
-// @version     1.3.12
+// @version     1.3.13
 // @description  ExHentai/E-Hentai 一体化工具：LANraragi 查重、纯浏览器图片 ZIP 下载与元数据打包、翻译高亮、无修正标记及统一悬浮面板。
 // @description:en  ExHentai/E-Hentai toolkit with LANraragi duplicate checking, browser-only image ZIP downloads with metadata, translation highlighting, uncensored labels and a draggable compact panel.
 // @author      Alog6437
@@ -299,7 +299,7 @@
         config[name] = typeof CONFIG === 'object' ? CONFIG[name] : null;
       });
       config.hasAuthentication = !!(typeof CONFIG === 'object' && CONFIG.lrrApiKey);
-      return { version: typeof GM_info !== 'undefined' && GM_info.script ? String(GM_info.script.version || '1.3.12') : '1.3.12',
+      return { version: typeof GM_info !== 'undefined' && GM_info.script ? String(GM_info.script.version || '1.3.13') : '1.3.13',
         sessionStartedAt: runtimeLogState.startedAt, exportedAt: new Date().toISOString(),
         page: redactRuntimeString(typeof location !== 'undefined' ? location.href : ''),
         userAgent: sanitizeRuntimeValue(typeof navigator !== 'undefined' ? navigator.userAgent : ''),
@@ -3718,17 +3718,53 @@
     function setupChineseHighlight() {
       if (!CONFIG.enableChineseHighlight) return;
 
-      var title_path = "//div[contains(@class, 'gl4t')]";
-      var titles = document.evaluate(title_path, document, null, XPathResult.ORDERED_NODE_SNAPSHOT_TYPE, null);
-      var title, idx = 0;
-      var chinesePatt = /中文|中国|Chinese|中國|汉化|漢化|未來數位|重嵌|新桥|CE家族|翻譯|翻译|嵌字|整合|个人|個人|机翻|機翻/;
-      var englishPatt = /\bEnglish\b|English\s*(?:Translation|Translated)|Translated\s*(?:to|into)\s*English|英語|英语|英文|英译|英譯|英訳/i;
-      var titlePatt = CONFIG.uiLanguage === 'en' ? englishPatt : chinesePatt;
-      while ((title = titles.snapshotItem(idx))) {
-        var value = title.innerText || '';
-        if (titlePatt.test(value)) title.setAttribute('style', 'color: #ff8d8d; font-weight: bold;');
-        idx++;
+      var selector = '.itg .glink, a[href*="/g/"] .glink, a.glink[href*="/g/"], .glname a[href*="/g/"], .itg .gl4t';
+      var marker = 'eh-translation-highlight';
+      if (!document.getElementById('eh-translation-highlight-style')) {
+        var style = document.createElement('style');
+        style.id = 'eh-translation-highlight-style';
+        style.textContent = '.itg .' + marker + ', .itg .' + marker + ' *, .' + marker + ', .' + marker + ' * { color:#ff8d8d !important; font-weight:bold !important; }';
+        (document.head || document.documentElement).appendChild(style);
       }
+      function scan() {
+        var chinesePatt = /中文|中国|Chinese|中國|汉化|漢化|未來數位|重嵌|新桥|CE家族|翻譯|翻译|嵌字|整合|个人|個人|机翻|機翻/i;
+        var englishPatt = /\bEnglish\b|English\s*(?:Translation|Translated)|Translated\s*(?:to|into)\s*English|英語|英语|英文|英译|英譯|英訳/i;
+        var titlePatt = CONFIG.uiLanguage === 'en' ? englishPatt : chinesePatt;
+        document.querySelectorAll(selector).forEach(function (title) {
+          // Modern favorites/list modes style the actual .glink or anchor,
+          // not the legacy thumbnail wrapper. Never color an entire card.
+          var nested = title.querySelector('.glink, a[href*="/g/"]');
+          var match = !nested && CONFIG.enableChineseHighlight && titlePatt.test(title.textContent || '');
+          title.classList.toggle(marker, !!match);
+        });
+      }
+      scan();
+      if (setupChineseHighlight.observer || typeof MutationObserver === 'undefined') return;
+      function touches(node) {
+        if (!node) return false;
+        if (node.nodeType !== 1) node = node.parentElement;
+        return !!(node && ((node.closest && node.closest('.itg, ' + selector)) ||
+          (node.querySelector && node.querySelector(selector))));
+      }
+      setupChineseHighlight.observer = new MutationObserver(function (mutations) {
+        var relevant = mutations.some(function (mutation) {
+          if (mutation.type === 'attributes') {
+            // Ignore our own marker changes, so highlighting cannot self-loop.
+            function withoutMarker(value) { return String(value || '').split(/\s+/).filter(function (name) { return name && name !== marker; }).join(' '); }
+            if (withoutMarker(mutation.oldValue) === withoutMarker(mutation.target.getAttribute('class'))) return false;
+          }
+          return touches(mutation.target) || Array.from(mutation.addedNodes || []).some(touches) || Array.from(mutation.removedNodes || []).some(touches);
+        });
+        if (!relevant || setupChineseHighlight.scanTimer) return;
+        setupChineseHighlight.scanTimer = setTimeout(function () {
+          setupChineseHighlight.scanTimer = null;
+          scan();
+        }, 80);
+      });
+      setupChineseHighlight.observer.observe(document.documentElement, {
+        childList: true, characterData: true, subtree: true,
+        attributes: true, attributeFilter: ['class'], attributeOldValue: true,
+      });
     }
 
     /* ================================================================

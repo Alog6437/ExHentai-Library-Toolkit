@@ -39,8 +39,8 @@ const rows = '<div id="nb"><input id="native-search" placeholder="Native search"
     await page.locator('[data-case="chinese"] .eh-uncensored-marker').waitFor();
     assert.equal(await page.locator('[data-case="chinese"] .eh-uncensored-marker').textContent(), '无修正');
     assert.equal(await page.locator('[data-case="plain"] .eh-uncensored-marker').count(), 0);
-    assert.equal(await page.locator('[data-case="chinese"] .gl4t').evaluate(node => getComputedStyle(node).color), 'rgb(255, 141, 141)');
-    assert.notEqual(await page.locator('[data-case="english"] .gl4t').evaluate(node => getComputedStyle(node).color), 'rgb(255, 141, 141)');
+    assert.equal(await page.locator('[data-case="chinese"] .gl4t a').evaluate(node => getComputedStyle(node).color), 'rgb(255, 141, 141)');
+    assert.notEqual(await page.locator('[data-case="english"] .gl4t a').evaluate(node => getComputedStyle(node).color), 'rgb(255, 141, 141)');
     assert.equal(await page.locator('#gdf').getAttribute('onclick'), 'return false');
     assert.equal(await page.locator('#posted_101').getAttribute('onclick'), 'return false');
     assert.equal(await page.locator('#g_search, #posted_101_favbtn, #posted_101_favcat').count(), 0);

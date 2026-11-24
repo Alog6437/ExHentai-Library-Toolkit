@@ -24,11 +24,11 @@ test('Chinese translation highlighting remains executable and respects its saved
   const start = source.indexOf('    function setupChineseHighlight(');
   const end = source.indexOf('    /* ===', start);
   assert.ok(start >= 0 && end > start);
-  function title(innerText) { return { innerText, attrs: {}, setAttribute(key, value) { this.attrs[key] = value; } }; }
+  function title(textContent) { const classes = new Set(); return { textContent, querySelector() { return null; }, classes, classList: { toggle(name, on) { if (on) classes.add(name); else classes.delete(name); } } }; }
   const chinese = title('安全速写集 [汉化]'), english = title('Safe Sketchbook [English]');
-  const ctx = vm.createContext({ CONFIG: { enableChineseHighlight: true, uiLanguage: 'zh' }, XPathResult: { ORDERED_NODE_SNAPSHOT_TYPE: 7 }, document: { evaluate() { return { snapshotItem: index => [chinese, english][index] || null }; } } });
+  const ctx = vm.createContext({ CONFIG: { enableChineseHighlight: true, uiLanguage: 'zh' }, document: { getElementById() { return {}; }, querySelectorAll() { return [chinese, english]; } } });
   vm.runInContext(source.slice(start, end), ctx); ctx.setupChineseHighlight();
-  assert.match(chinese.attrs.style, /#ff8d8d/); assert.equal(english.attrs.style, undefined);
-  chinese.attrs = {}; ctx.CONFIG.enableChineseHighlight = false; ctx.setupChineseHighlight();
-  assert.equal(chinese.attrs.style, undefined);
+  assert.equal(chinese.classes.has('eh-translation-highlight'), true); assert.equal(english.classes.size, 0);
+  chinese.classes.clear(); ctx.CONFIG.enableChineseHighlight = false; ctx.setupChineseHighlight();
+  assert.equal(chinese.classes.size, 0);
 });

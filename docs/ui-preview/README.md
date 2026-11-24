@@ -9,6 +9,7 @@
 - [下载](<download-panel.png>)、[查重](<check-panel.png>)、[设置](<settings-panel.png>)。
 - [浅色主题](<download-panel-light.png>)、[下载暂停](<paused-panel.png>)、[390 px 窄屏](<03-mobile.png>)。
 - [拖动至左下后向上展开](<dragged-desktop.png>)、[拖动与窄屏自动避让](<dragged-mobile.png>)。
+- [收藏页标题高亮](<favorites-highlighting.png>)：通过虚构标题验证不同布局、动态列表、标题改写及中英文／开关偏好，不使用真实封面。
 
 ## 重现
 
@@ -23,6 +24,7 @@ NODE_PATH=/tmp/elt-ui-preview-tools/node_modules node tools/test-settings-browse
 NODE_PATH=/tmp/elt-ui-preview-tools/node_modules node tools/test-position-browser.cjs
 NODE_PATH=/tmp/elt-ui-preview-tools/node_modules node tools/test-simplified-browser.cjs
 NODE_PATH=/tmp/elt-ui-preview-tools/node_modules node tools/test-original-filename-browser.cjs
+NODE_PATH=/tmp/elt-ui-preview-tools/node_modules node tools/test-translation-highlight-browser.cjs
 node --check ExHentai_Library_Toolkit.user.js
 node --test tests/*.cjs
 ```

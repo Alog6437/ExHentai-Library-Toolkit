@@ -1,6 +1,6 @@
 # ExHentai Library Toolkit
 
-**Current version: 1.3.12**
+**Current version: 1.3.13**
 
 All-in-one userscript for ExHentai / E-Hentai: **LANraragi duplicate checking**, browser-only original-image ZIP downloads with optional metadata, Chinese/English translation highlighting and uncensored labels.
 
@@ -54,7 +54,7 @@ Adult scripts can also be found on [Sleazy Fork](https://sleazyfork.org/). Those
 
 1. Download `ExHentai_Library_Toolkit.user.js` from this repository.
 2. Drag the file into a browser window, or use your manager's "Utilities → Import".
-3. Confirm the installed version is **1.3.12** (the panel footer shows the version too), then reload the page.
+3. Confirm the installed version is **1.3.13** (the panel footer shows the version too), then reload the page.
 
 ### Updating and removing
 
@@ -263,6 +263,11 @@ The script stores the LANraragi address and API key in local browser storage. Ev
 ---
 
 ## Changelog
+
+### 1.3.13
+
+- Fix translation-title highlighting on favorites pages and alternate list layouts by styling actual title nodes instead of only legacy thumbnail wrappers.
+- Independently watch dynamic insertions, list replacements and edited titles, even with LRR/uncensored features disabled. Preserve existing inline styles and ignore marker-only mutations to avoid observer loops.
 
 ### 1.3.12
 
